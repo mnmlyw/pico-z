@@ -1,0 +1,21 @@
+.{
+    .name = .pico_z,
+    .version = "0.1.0",
+    .fingerprint = 0xc929b4172eb7883c,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .zlua = .{
+            .url = "git+https://github.com/natecraddock/ziglua#cf0e794d429093f0f15694898636a658ebceb703",
+            .hash = "zlua-0.1.0-hGRpC-xTBQARfQcp_35Rcs-Z6KDqtEf3N-IRWi9NFogn",
+        },
+        .sdl = .{
+            .url = "git+https://github.com/castholm/SDL#887fa805e40d5c7bb3955ae69b89ed566c6a0471",
+            .hash = "sdl-0.4.0+3.4.0-SDL--rq2owEZsySGuHCuVJ9naEvH3i3e_pyUIjziBtJ-",
+        },
+    },
+}

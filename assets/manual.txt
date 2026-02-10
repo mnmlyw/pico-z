@@ -1,0 +1,19 @@
+PICO-Z — PICO-8 cartridge runtime
+
+Usage:
+  pico-z <cart>.p8
+  pico-z <cart>.p8.png
+
+You can also drag and drop .p8 files onto the window.
+
+macOS:
+  If the app shows "damaged" or "can't be opened", run:
+    xattr -cr PICO-Z.app
+
+Controls:
+  Arrow keys    D-pad
+  Z / C         O button
+  X / V         X button
+  P             Save state
+  L             Load state
+  ESC           Quit
