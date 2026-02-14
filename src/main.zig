@@ -36,7 +36,7 @@ pub fn main() !void {
     defer c.SDL_Quit();
 
     const window = c.SDL_CreateWindow(
-        "pico-z",
+        "PICO-Z",
         WINDOW_W,
         WINDOW_H,
         c.SDL_WINDOW_RESIZABLE,
@@ -74,6 +74,9 @@ pub fn main() !void {
     var pixel_buffer: [SCREEN_W * SCREEN_H]u32 = undefined;
     @memset(&pixel_buffer, 0xFF000000); // black
 
+    // Save/load indicator state
+    var indicator_end_time: i128 = 0;
+
     var audio = audio_mod.Audio.init(&memory);
     defer audio.deinit();
     audio.openDevice();
@@ -93,15 +96,14 @@ pub fn main() !void {
     var lua_engine = try LuaEngine.init(allocator, &pico);
     defer lua_engine.deinit();
 
+    var current_cart_path: ?[]const u8 = cart_path;
+    var owned_cart_path: ?[]u8 = null;
+    defer if (owned_cart_path) |p| allocator.free(p);
+
     if (cart_path) |path| {
-        var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
-            try cart_mod.loadP8PngFile(allocator, path, &memory)
-        else
-            try cart_mod.loadP8File(allocator, path, &memory);
-        defer cart.deinit();
-        memory.saveRom();
-        try lua_engine.loadCart(&cart, allocator);
-        lua_engine.callInit();
+        loadCart(&lua_engine, &memory, allocator, path) catch |err| {
+            std.log.err("failed to load cart: {}", .{err});
+        };
     }
 
     // Main loop
@@ -119,16 +121,32 @@ pub fn main() !void {
             if (event.type == c.SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == c.SDLK_ESCAPE) running = false;
                 if (event.key.key == c.SDLK_P) {
-                    if (cart_path) |path| {
+                    if (current_cart_path) |path| {
                         save_state.saveState(&pico, &lua_engine, path) catch |err| {
                             std.log.err("save state failed: {}", .{err});
                         };
+                        indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
                     }
                 }
                 if (event.key.key == c.SDLK_L) {
-                    if (cart_path) |path| {
+                    if (current_cart_path) |path| {
                         save_state.loadState(&pico, &lua_engine, path) catch |err| {
                             std.log.err("load state failed: {}", .{err});
+                        };
+                        indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                    }
+                }
+            }
+            if (event.type == c.SDL_EVENT_DROP_FILE) {
+                if (event.drop.data) |data| {
+                    const path = std.mem.span(data);
+                    if (owned_cart_path) |p| allocator.free(p);
+                    owned_cart_path = allocator.dupe(u8, path) catch null;
+                    current_cart_path = owned_cart_path;
+                    if (owned_cart_path) |p| {
+                        memory.initDrawState();
+                        loadCart(&lua_engine, &memory, allocator, p) catch |err| {
+                            std.log.err("failed to load dropped cart: {}", .{err});
                         };
                     }
                 }
@@ -156,6 +174,21 @@ pub fn main() !void {
         // Render screen buffer to ARGB
         gfx.renderToARGB(&memory, &pixel_buffer);
 
+        // Draw save/load indicator: 2px screen border cycling through 16 colors
+        if (frame_start < indicator_end_time) {
+            const palette = @import("palette.zig");
+            const elapsed_ns: u64 = @intCast(indicator_end_time - frame_start);
+            const color_idx: u5 = @intCast((elapsed_ns / 50_000_000) % 16);
+            const color = palette.colors[color_idx];
+            for (0..SCREEN_H) |y| {
+                for (0..SCREEN_W) |x| {
+                    if (x < 2 or x >= SCREEN_W - 2 or y < 2 or y >= SCREEN_H - 2) {
+                        pixel_buffer[y * SCREEN_W + x] = color;
+                    }
+                }
+            }
+        }
+
         // Upload to GPU
         _ = c.SDL_UpdateTexture(texture, null, &pixel_buffer, SCREEN_W * @sizeOf(u32));
         _ = c.SDL_RenderClear(renderer);
@@ -171,6 +204,18 @@ pub fn main() !void {
             std.Thread.sleep(frame_time_ns - elapsed);
         }
     }
+}
+
+fn loadCart(lua_engine: *LuaEngine, memory: *Memory, allocator: std.mem.Allocator, path: []const u8) !void {
+    var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
+        try cart_mod.loadP8PngFile(allocator, path, memory)
+    else
+        try cart_mod.loadP8File(allocator, path, memory);
+    defer cart.deinit();
+    memory.saveRom();
+    try lua_engine.reinit();
+    try lua_engine.loadCart(&cart, allocator);
+    lua_engine.callInit();
 }
 
 fn displayError(memory: *Memory, msg: []const u8) void {
@@ -225,3 +270,4 @@ fn drawCharDirect(memory: *Memory, ch: u8, x: i32, y: i32, col: u4) void {
         }
     }
 }
+

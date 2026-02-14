@@ -14,7 +14,7 @@
             .hash = "zlua-0.1.0-hGRpC-xTBQARfQcp_35Rcs-Z6KDqtEf3N-IRWi9NFogn",
         },
         .sdl = .{
-            .url = "git+https://github.com/castholm/SDL",
+            .url = "git+https://github.com/castholm/SDL#887fa805e40d5c7bb3955ae69b89ed566c6a0471",
             .hash = "sdl-0.4.0+3.4.0-SDL--rq2owEZsySGuHCuVJ9naEvH3i3e_pyUIjziBtJ-",
         },
     },

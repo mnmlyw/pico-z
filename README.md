@@ -22,6 +22,22 @@ zig build run -- <cart>        # build and run a .p8 or .p8.png cart
 - **Input** — keyboard + gamepad via SDL3, btn/btnp with repeat
 - **Memory** — flat 65536-byte RAM matching PICO-8 layout (sprites, map, SFX, draw state, screen)
 - **Quick Save/Load** — press **P** to save state, **L** to load; saves full game state (RAM, audio, Lua globals) to `<cart>.sav` — not available in standard PICO-8
+- **Drag and drop** — drop `.p8` or `.p8.png` files onto the window to load
+
+## Downloads
+
+Pre-built binaries for macOS, Windows, and Linux are available on the [Releases](../../releases) page.
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| Arrow keys | D-pad |
+| Z / C | O button |
+| X / V | X button |
+| P | Save state |
+| L | Load state |
+| ESC | Quit |
 
 ## Status
 

@@ -26,11 +26,15 @@ pub fn build(b: *std.Build) void {
     });
     mod.addImport("zlua", zlua_dep.module("zlua"));
     mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    mod.addWin32ResourceFile(.{ .file = b.path("assets/icon.rc") });
 
     const exe = b.addExecutable(.{
         .name = "pico-z",
         .root_module = mod,
     });
+    if (target.result.os.tag == .windows) {
+        exe.subsystem = .Windows;
+    }
 
     b.installArtifact(exe);
 
