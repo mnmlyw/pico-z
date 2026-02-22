@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     });
     mod.addImport("zlua", zlua_dep.module("zlua"));
     mod.linkLibrary(sdl_dep.artifact("SDL3"));
-    mod.addWin32ResourceFile(.{ .file = b.path("assets/icon.rc") });
+    mod.addWin32ResourceFile(.{ .file = b.path("res/icon.rc") });
 
     const exe = b.addExecutable(.{
         .name = "pico-z",

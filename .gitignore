@@ -1,0 +1,7 @@
+.DS_Store
+.claude/
+.zig-cache/
+zig-out/
+dist/
+*.p8
+*.p8.png

@@ -1,8 +1,10 @@
 # PICO-Z
 
-An alternative way to play [PICO-8](https://www.lexaloffle.com/pico-8.php) games on multiple platforms. Loads `.p8` and `.p8.png` carts using ziglua (Lua 5.2) + SDL3, implemented in Zig.
+A PICO-8 emulator with save states. Plays `.p8` and `.p8.png` carts on macOS, Windows, and Linux.
 
-> **Note:** PICO-Z is a runtime/player only — it does not replace PICO-8's editor, splore, or game creation tools. You still need PICO-8 to make games.
+Built with Zig, ziglua (Lua 5.2), and SDL3.
+
+> **Note:** PICO-Z is a player/emulator only — it does not include PICO-8's editor, splore, or game creation tools. You still need [PICO-8](https://www.lexaloffle.com/pico-8.php) to make games.
 
 ## Build & Run
 

@@ -5,7 +5,7 @@ VERSION="${1:+_$1}"
 VNUM="${1:-0.0.0}"
 VNUM="${VNUM#v}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-OUT="$ROOT/tmp/release"
+OUT="$ROOT/dist"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -14,13 +14,13 @@ cd "$ROOT"
 
 # macOS (native arm64)
 echo "Building macOS..."
-zig build -Doptimize=ReleaseSafe --prefix tmp
+zig build -Doptimize=ReleaseSafe
 mkdir -p "$OUT/pico-z/PICO-Z.app/Contents/MacOS" "$OUT/pico-z/PICO-Z.app/Contents/Resources"
-cp tmp/bin/pico-z "$OUT/pico-z/PICO-Z.app/Contents/MacOS/pico-z"
+cp zig-out/bin/pico-z "$OUT/pico-z/PICO-Z.app/Contents/MacOS/pico-z"
 
-cp "$ROOT/assets/icon.icns" "$OUT/pico-z/PICO-Z.app/Contents/Resources/pico-z.icns"
-cp "$ROOT/assets/license.txt" "$OUT/pico-z/license.txt"
-cp "$ROOT/assets/manual.txt" "$OUT/pico-z/"
+cp "$ROOT/res/icon.icns" "$OUT/pico-z/PICO-Z.app/Contents/Resources/pico-z.icns"
+cp "$ROOT/res/license.txt" "$OUT/pico-z/license.txt"
+cp "$ROOT/res/manual.txt" "$OUT/pico-z/"
 cat > "$OUT/pico-z/PICO-Z.app/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -69,22 +69,22 @@ rm -rf "$OUT/pico-z"
 
 # Windows
 echo "Building Windows..."
-zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe --prefix tmp
+zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe
 mkdir -p "$OUT/pico-z"
-cp tmp/bin/pico-z.exe "$OUT/pico-z/pico-z.exe"
-cp "$ROOT/assets/license.txt" "$OUT/pico-z/license.txt"
-cp "$ROOT/assets/manual.txt" "$OUT/pico-z/"
+cp zig-out/bin/pico-z.exe "$OUT/pico-z/pico-z.exe"
+cp "$ROOT/res/license.txt" "$OUT/pico-z/license.txt"
+cp "$ROOT/res/manual.txt" "$OUT/pico-z/"
 cd "$OUT" && zip -r "pico-z${VERSION}_windows.zip" pico-z/ && cd "$ROOT"
 rm -rf "$OUT/pico-z"
 
 # Linux
 echo "Building Linux..."
-zig build -Dtarget=x86_64-linux -Doptimize=ReleaseSafe --prefix tmp
+zig build -Dtarget=x86_64-linux -Doptimize=ReleaseSafe
 mkdir -p "$OUT/pico-z"
-cp tmp/bin/pico-z "$OUT/pico-z/pico-z"
-cp "$ROOT/assets/license.txt" "$OUT/pico-z/license.txt"
-cp "$ROOT/assets/manual.txt" "$OUT/pico-z/"
-cp "$ROOT/assets/icon.png" "$OUT/pico-z/"
+cp zig-out/bin/pico-z "$OUT/pico-z/pico-z"
+cp "$ROOT/res/license.txt" "$OUT/pico-z/license.txt"
+cp "$ROOT/res/manual.txt" "$OUT/pico-z/"
+cp "$ROOT/res/icon.png" "$OUT/pico-z/"
 cd "$OUT" && zip -r "pico-z${VERSION}_linux.zip" pico-z/ && cd "$ROOT"
 rm -rf "$OUT/pico-z"
 
