@@ -7,6 +7,7 @@ const gfx = @import("gfx.zig");
 const input_mod = @import("input.zig");
 const math_api = @import("math_api.zig");
 const audio_mod = @import("audio.zig");
+const cartdata_store = @import("cartdata_store.zig");
 
 pub const SCREEN_W = 128;
 pub const SCREEN_H = 128;
@@ -26,7 +27,9 @@ pub const PicoState = struct {
 
     // Cartdata
     cart_data_id: ?[]const u8 = null,
+    cart_data_dirty: bool = false,
     allocator: std.mem.Allocator,
+    target_fps: u8 = 30,
 };
 
 pub fn getPico(lua: *zlua.Lua) *PicoState {
@@ -382,7 +385,7 @@ fn api_stat(lua: *zlua.Lua) c_int {
         4 => {
             _ = lua.pushString(""); // clipboard
         },
-        7 => lua.pushNumber(30), // FPS
+        7 => lua.pushNumber(@floatFromInt(pico.target_fps)),
         16...19 => {
             // Current note for SFX channel 0-3
             if (pico.audio) |audio| {
@@ -473,8 +476,22 @@ fn api_printh(lua: *zlua.Lua) c_int {
 }
 
 fn api_cartdata(lua: *zlua.Lua) c_int {
-    _ = getPico(lua);
-    // stub: accept but ignore
+    const pico = getPico(lua);
+    const id = lua.toString(1) catch return 0;
+
+    // PICO-8 allows selecting a single cartdata id; keep first selection.
+    if (pico.cart_data_id) |existing| {
+        if (!std.mem.eql(u8, existing, id)) return 0;
+        return 0;
+    }
+
+    const owned_id = pico.allocator.dupe(u8, id) catch return 0;
+    pico.cart_data_id = owned_id;
+    pico.cart_data_dirty = false;
+    cartdata_store.load(pico.allocator, pico.memory, owned_id) catch |err| {
+        std.log.warn("cartdata load failed for {s}: {}", .{ owned_id, err });
+        @memset(pico.memory.ram[mem_const.ADDR_CART_DATA .. mem_const.ADDR_CART_DATA + 256], 0);
+    };
     return 0;
 }
 
@@ -500,6 +517,13 @@ fn api_dset(lua: *zlua.Lua) c_int {
         const addr: u16 = mem_const.ADDR_CART_DATA + @as(u16, @intCast(idx)) * 4;
         const fixed: i32 = @intFromFloat(val * 65536.0);
         pico.memory.poke32(addr, @bitCast(fixed));
+        if (pico.cart_data_id) |id| {
+            pico.cart_data_dirty = true;
+            cartdata_store.save(pico.allocator, pico.memory, id) catch |err| {
+                std.log.warn("cartdata save failed for {s}: {}", .{ id, err });
+            };
+            pico.cart_data_dirty = false;
+        }
     }
     return 0;
 }
@@ -548,4 +572,3 @@ pub fn optNum(lua: *zlua.Lua, idx: i32, default: f64) f64 {
     if (lua.isNoneOrNil(idx)) return default;
     return luaToNum(lua, idx);
 }
-

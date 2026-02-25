@@ -89,6 +89,7 @@ pub fn main() !void {
         .start_time = std.time.milliTimestamp(),
         .allocator = allocator,
     };
+    defer if (pico.cart_data_id) |id| allocator.free(id);
 
     memory.initDrawState();
 
@@ -107,8 +108,6 @@ pub fn main() !void {
     }
 
     // Main loop
-    const target_fps: u32 = if (lua_engine.use60fps()) 60 else 30;
-    const frame_time_ns: u64 = 1_000_000_000 / target_fps;
     var running = true;
 
     while (running) {
@@ -144,6 +143,11 @@ pub fn main() !void {
                     owned_cart_path = allocator.dupe(u8, path) catch null;
                     current_cart_path = owned_cart_path;
                     if (owned_cart_path) |p| {
+                        if (pico.cart_data_id) |id| {
+                            allocator.free(id);
+                            pico.cart_data_id = null;
+                        }
+                        pico.cart_data_dirty = false;
                         memory.initDrawState();
                         loadCart(&lua_engine, &memory, allocator, p) catch |err| {
                             std.log.err("failed to load dropped cart: {}", .{err});
@@ -198,6 +202,8 @@ pub fn main() !void {
         pico.frame_count += 1;
 
         // Frame timing
+        pico.target_fps = if (lua_engine.use60fps()) 60 else 30;
+        const frame_time_ns: u64 = 1_000_000_000 / @as(u64, pico.target_fps);
         const frame_end = std.time.nanoTimestamp();
         const elapsed: u64 = @intCast(frame_end - frame_start);
         if (elapsed < frame_time_ns) {
@@ -270,4 +276,3 @@ fn drawCharDirect(memory: *Memory, ch: u8, x: i32, y: i32, col: u4) void {
         }
     }
 }
-
