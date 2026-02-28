@@ -122,37 +122,43 @@ pub fn main() !void {
                 if (event.key.key == c.SDLK_ESCAPE) running = false;
                 if (event.key.key == c.SDLK_P) {
                     if (current_cart_path) |path| {
-                        save_state.saveState(&pico, &lua_engine, path) catch |err| {
+                        if (save_state.saveState(&pico, &lua_engine, path)) |_| {
+                            indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                        } else |err| {
                             std.log.err("save state failed: {}", .{err});
-                        };
-                        indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                        }
                     }
                 }
                 if (event.key.key == c.SDLK_L) {
                     if (current_cart_path) |path| {
-                        save_state.loadState(&pico, &lua_engine, path) catch |err| {
+                        if (save_state.loadState(&pico, &lua_engine, path)) |_| {
+                            indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                        } else |err| {
                             std.log.err("load state failed: {}", .{err});
-                        };
-                        indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                        }
                     }
                 }
             }
             if (event.type == c.SDL_EVENT_DROP_FILE) {
                 if (event.drop.data) |data| {
+                    defer c.SDL_free(@constCast(data));
                     const path = std.mem.span(data);
-                    if (owned_cart_path) |p| allocator.free(p);
-                    owned_cart_path = allocator.dupe(u8, path) catch null;
-                    current_cart_path = owned_cart_path;
-                    if (owned_cart_path) |p| {
+                    const new_path = allocator.dupe(u8, path) catch {
+                        std.log.err("failed to store dropped cart path", .{});
+                        continue;
+                    };
+                    if (loadCart(&lua_engine, &memory, allocator, new_path)) |_| {
+                        if (owned_cart_path) |p| allocator.free(p);
+                        owned_cart_path = new_path;
+                        current_cart_path = new_path;
                         if (pico.cart_data_id) |id| {
                             allocator.free(id);
                             pico.cart_data_id = null;
                         }
                         pico.cart_data_dirty = false;
-                        memory.initDrawState();
-                        loadCart(&lua_engine, &memory, allocator, p) catch |err| {
-                            std.log.err("failed to load dropped cart: {}", .{err});
-                        };
+                    } else |err| {
+                        allocator.free(new_path);
+                        std.log.err("failed to load dropped cart: {}", .{err});
                     }
                 }
             }
@@ -224,11 +230,16 @@ pub fn main() !void {
 }
 
 fn loadCart(lua_engine: *LuaEngine, memory: *Memory, allocator: std.mem.Allocator, path: []const u8) !void {
+    var next_memory = Memory.init();
+    next_memory.initDrawState();
+
     var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
-        try cart_mod.loadP8PngFile(allocator, path, memory)
+        try cart_mod.loadP8PngFile(allocator, path, &next_memory)
     else
-        try cart_mod.loadP8File(allocator, path, memory);
+        try cart_mod.loadP8File(allocator, path, &next_memory);
     defer cart.deinit();
+
+    memory.* = next_memory;
     memory.saveRom();
     try lua_engine.reinit();
     try lua_engine.loadCart(&cart, allocator);
