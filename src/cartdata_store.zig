@@ -3,7 +3,7 @@ const Memory = @import("memory.zig").Memory;
 const mem_const = @import("memory.zig");
 
 const CARTDATA_DIR = ".pico-z-cartdata";
-const CARTDATA_BYTES = 256;
+pub const CARTDATA_BYTES = 256;
 
 fn appendHexByte(out: *std.ArrayList(u8), allocator: std.mem.Allocator, b: u8) !void {
     const hex = "0123456789abcdef";
@@ -44,10 +44,11 @@ pub fn load(allocator: std.mem.Allocator, memory: *Memory, id: []const u8) !void
     const path = try pathForId(allocator, id);
     defer allocator.free(path);
 
-    @memset(cartDataSlice(memory), 0);
-
     const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return,
+        error.FileNotFound => {
+            @memset(cartDataSlice(memory), 0);
+            return;
+        },
         else => return err,
     };
     defer file.close();

@@ -10,6 +10,7 @@ const gfx = @import("gfx.zig");
 const input_mod = @import("input.zig");
 const audio_mod = @import("audio.zig");
 const save_state = @import("save_state.zig");
+const cartdata_store = @import("cartdata_store.zig");
 
 const SCREEN_W = 128;
 const SCREEN_H = 128;
@@ -169,6 +170,16 @@ pub fn main() !void {
         // Run cart
         lua_engine.callUpdate();
         lua_engine.callDraw();
+
+        // Flush dirty cartdata once per frame
+        if (pico.cart_data_dirty) {
+            if (pico.cart_data_id) |id| {
+                cartdata_store.save(pico.allocator, pico.memory, id) catch |err| {
+                    std.log.warn("cartdata save failed for {s}: {}", .{ id, err });
+                };
+            }
+            pico.cart_data_dirty = false;
+        }
 
         // Error display
         if (lua_engine.had_error) {
