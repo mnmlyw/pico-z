@@ -1,6 +1,7 @@
 const std = @import("std");
 const Memory = @import("memory.zig").Memory;
 const mem_const = @import("memory.zig");
+const fs_atomic = @import("fs_atomic.zig");
 
 const CARTDATA_DIR = ".pico-z-cartdata";
 pub const CARTDATA_BYTES = 256;
@@ -65,9 +66,8 @@ pub fn save(allocator: std.mem.Allocator, memory: *Memory, id: []const u8) !void
     const path = try pathForId(allocator, id);
     defer allocator.free(path);
 
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(cartDataSlice(memory));
+    // Use atomic replace so existing cartdata survives interrupted writes.
+    try fs_atomic.writeFileAtomic(allocator, std.fs.cwd(), path, cartDataSlice(memory));
 }
 
 test "cartdata roundtrip" {

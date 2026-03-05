@@ -6,6 +6,7 @@ const api = @import("api.zig");
 const audio_mod = @import("audio.zig");
 const input_mod = @import("input.zig");
 const LuaEngine = @import("lua_engine.zig").LuaEngine;
+const fs_atomic = @import("fs_atomic.zig");
 
 const MAGIC = [4]u8{ 'P', 'Z', 'S', 'V' };
 const VERSION: u8 = 2;
@@ -89,10 +90,8 @@ pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     // 5. Lua globals (as Lua script)
     try serializeLuaGlobals(&buf, alloc, lua_engine.lua);
 
-    // Write to file
-    const file = try std.fs.cwd().createFile(save_path, .{});
-    defer file.close();
-    try file.writeAll(buf.items);
+    // Write to file atomically to avoid partial save corruption.
+    try fs_atomic.writeFileAtomic(alloc, std.fs.cwd(), save_path, buf.items);
 
     std.log.info("save state written to {s}", .{save_path});
 }
