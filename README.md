@@ -4,6 +4,8 @@ A PICO-8 emulator with save states. Plays `.p8` and `.p8.png` carts on macOS, Wi
 
 Built with Zig, ziglua (Lua 5.2), and SDL3.
 
+![Demo](res/demo.gif)
+
 > **Note:** PICO-Z is a player/emulator only — it does not include PICO-8's editor, splore, or game creation tools. You still need [PICO-8](https://www.lexaloffle.com/pico-8.php) to make games.
 
 ## Build & Run
