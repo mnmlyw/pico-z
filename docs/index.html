@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PICO-Z — A PICO-8 Emulator</title>
+<meta name="description" content="PICO-Z is a free, open-source PICO-8 emulator. Play any .p8 or .p8.png cartridge on macOS, Windows, and Linux.">
+<link rel="icon" href="favicon.png" type="image/png">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #000;
+    --text: #e0dfe6;
+    --dim: #999;
+    --faint: #555;
+    --accent: #29ADFF;
+    --font: 'Inter', -apple-system, sans-serif;
+    --mono: ui-monospace, 'SF Mono', monospace;
+  }
+
+  html { background: var(--bg); }
+
+  body {
+    font-family: var(--font);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 540px;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 3rem;
+  }
+
+  /* ── Header ── */
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin-bottom: 0.3rem;
+    text-align: center;
+  }
+
+  .sub {
+    color: var(--dim);
+    font-size: 0.9rem;
+    margin-bottom: 2rem;
+    text-align: center;
+  }
+
+  /* ── Demo ── */
+  .demo img {
+    display: block;
+    width: 100%;
+  }
+
+  .demo-caption {
+    font-size: 0.78rem;
+    color: var(--faint);
+    margin-top: 0.1rem;
+    text-align: center;
+  }
+
+  /* ── Buttons ── */
+  .buttons {
+    display: flex;
+    gap: 0.5rem;
+    margin: 1.5rem 0 2.5rem;
+    padding-top: 0.5rem;
+    justify-content: center;
+  }
+
+  .btn {
+    font-family: var(--font);
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 0.5rem 1.1rem;
+    border-radius: 6px;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: opacity 0.15s;
+  }
+
+  .btn:hover { opacity: 0.85; }
+  .btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .btn-primary { background: var(--accent); color: #000; }
+  .btn-ghost { background: #1a1a1a; color: var(--dim); border: 1px solid #2a2a2a; }
+
+  /* ── Info grid ── */
+  .info {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  .info h2 {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--faint);
+    margin-bottom: 0.75rem;
+  }
+
+  /* ── How it works ── */
+  .steps {
+    list-style: none;
+    counter-reset: step;
+  }
+
+  .steps li {
+    font-size: 0.85rem;
+    color: var(--dim);
+    padding-left: 1.4rem;
+    position: relative;
+    margin-bottom: 0.5rem;
+  }
+
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 0.82rem;
+  }
+
+  .steps li strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  /* ── Controls ── */
+  .key-list {
+    list-style: none;
+  }
+
+  .key-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.35rem 0;
+    font-size: 0.85rem;
+    border-bottom: 1px solid #151515;
+  }
+
+  .key-list li:last-child {
+    border-bottom: none;
+  }
+
+  .key-list .action {
+    color: var(--dim);
+  }
+
+  .key-group {
+    display: flex;
+    gap: 0.2rem;
+  }
+
+  kbd {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    background: #1a1a1a;
+    color: var(--text);
+    padding: 0.12rem 0.4rem;
+    border-radius: 3px;
+    border: 1px solid #2a2a2a;
+    box-shadow: 0 1px 0 #222;
+  }
+
+  .note {
+    font-size: 0.78rem;
+    color: var(--faint);
+    margin-top: 0.5rem;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #1a1a1a;
+    font-size: 0.78rem;
+    color: var(--faint);
+  }
+
+  .footer a { color: var(--dim); text-decoration: none; }
+  .footer a:hover { color: var(--text); }
+
+  @media (max-width: 500px) {
+    .page { padding: 2rem 1rem; }
+    .buttons { flex-direction: column; }
+    .info { grid-template-columns: 1fr; gap: 1.5rem; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1><img src="icon.png" alt="" width="24" height="24" style="image-rendering:pixelated;vertical-align:-3px;margin-right:0.4rem;">PICO-Z</h1>
+  <p class="sub">Play any PICO-8 game on your desktop. Save your progress anytime.</p>
+
+  <div class="demo">
+    <img src="demo.gif" alt="PICO-Z running Celeste Classic">
+  </div>
+
+  <div class="buttons">
+    <a href="https://github.com/mnmlyw/pico-z/releases" class="btn btn-primary">
+      <svg viewBox="0 0 16 16"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14ZM7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.969a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.78a.749.749 0 1 1 1.06-1.06l1.97 1.969Z"/></svg>
+      Download
+    </a>
+    <a href="https://github.com/mnmlyw/pico-z" class="btn btn-ghost">
+      <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      GitHub
+    </a>
+  </div>
+
+  <div class="info">
+    <div>
+      <h2>Getting started</h2>
+      <ol class="steps">
+        <li><strong>Get a game</strong> — find .p8 or .p8.png carts on <a href="https://www.lexaloffle.com/bbs/?cat=7" style="color:var(--accent);text-decoration:none;">the PICO-8 BBS</a></li>
+        <li><strong>Open it</strong> — drag the cart file onto the PICO-Z window</li>
+        <li><strong>Save anytime</strong> — press <kbd>P</kbd> to save your progress, <kbd>L</kbd> to load it back</li>
+      </ol>
+    </div>
+    <div>
+      <h2>Controls</h2>
+      <ul class="key-list">
+        <li><span class="key-group"><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd></span> <span class="action">Move</span></li>
+        <li><span class="key-group"><kbd>Z</kbd><kbd>C</kbd></span> <span class="action">O button</span></li>
+        <li><span class="key-group"><kbd>X</kbd><kbd>V</kbd></span> <span class="action">X button</span></li>
+        <li><span class="key-group"><kbd>P</kbd></span> <span class="action">Save state</span></li>
+        <li><span class="key-group"><kbd>L</kbd></span> <span class="action">Load state</span></li>
+      </ul>
+      <p class="note">Gamepads also supported.</p>
+    </div>
+  </div>
+
+
+</div>
+</body>
+</html>
