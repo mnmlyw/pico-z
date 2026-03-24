@@ -135,6 +135,19 @@ fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in
             }
         }
 
+        // P8SCII button glyph characters -> numeric button IDs
+        // These special bytes are used in PICO-8 code as shorthand for button numbers
+        if (ch >= 0x80) {
+            if (p8sciiButtonId(ch)) |btn_str| {
+                try out.appendSlice(allocator, btn_str);
+            } else {
+                // Unknown high byte outside string/comment — drop it
+                // (commonly appears in comments as decorative glyphs)
+            }
+            i += 1;
+            continue;
+        }
+
         // != -> ~=
         if (ch == '!' and i + 1 < line.len and line[i + 1] == '=') {
             try out.appendSlice(allocator, "~=");
@@ -737,4 +750,18 @@ fn parseBinaryLiteral(s: []const u8) f64 {
         }
     }
     return @as(f64, @floatFromInt(int_part)) + frac_part;
+}
+
+/// Map P8SCII special glyph bytes to their PICO-8 button ID strings.
+/// In PICO-8, these characters can be used directly as btn()/btnp() arguments.
+fn p8sciiButtonId(ch: u8) ?[]const u8 {
+    return switch (ch) {
+        0x83 => "3", // ⬇️ down
+        0x8B => "0", // ⬅️ left
+        0x8E => "5", // ❎ X button
+        0x91 => "1", // ➡️ right
+        0x94 => "2", // ⬆️ up  (also 🅾️ in some references)
+        0x97 => "4", // 🅾️ O button (also ⬆️ in some references)
+        else => null,
+    };
 }

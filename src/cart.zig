@@ -504,13 +504,22 @@ fn decompressPxa(allocator: std.mem.Allocator, region: []const u8) ![]u8 {
         const block_type = reader.readBit() catch break;
 
         if (block_type == 1) {
-            // CHR: unary-coded index into MTF table
-            var idx: usize = 0;
+            // CHR: exponential Golomb-like index into MTF table
+            // Read 1-bits to determine extra width, then read (4 + extra) bits
+            var extra: u5 = 0;
             while (true) {
                 const bit = reader.readBit() catch break;
-                if (bit == 1) break;
-                idx += 1;
+                if (bit == 0) break;
+                extra += 1;
             }
+            const base: usize = ((@as(usize, 1) << extra) - 1) << 4;
+            const n_bits = @as(u5, 4) + extra;
+            var raw: usize = 0;
+            for (0..n_bits) |i| {
+                const b = try reader.readBit();
+                raw |= @as(usize, b) << @intCast(i);
+            }
+            const idx: usize = raw + base;
             if (idx >= 256) return error.InvalidPxa;
 
             const ch = mtf[idx];
@@ -527,28 +536,27 @@ fn decompressPxa(allocator: std.mem.Allocator, region: []const u8) ![]u8 {
             }
         } else {
             // REF: offset + length
-            // Offset encoding: read 2 bits to determine size
-            const offset_type = try reader.readBits(2);
-            var ref_offset: usize = 0;
-
-            switch (offset_type) {
-                // 2-bit prefix determines offset bit width
-                0b01 => { // 5-bit offset (1-32)
-                    ref_offset = @as(usize, try reader.readBits(5)) + 1;
-                },
-                0b00 => { // 10-bit offset (1-1024)
-                    ref_offset = @as(usize, try reader.readBits(10)) + 1;
-                },
-                0b10 => { // 15-bit offset (1-32768)
-                    ref_offset = @as(usize, try reader.readBits(15)) + 1;
-                },
-                0b11 => { // 5-bit offset (same as 0b01)
-                    ref_offset = @as(usize, try reader.readBits(5)) + 1;
-                },
+            // Offset encoding: nested single-bit decisions
+            //   first=1, second=1 → 5-bit offset
+            //   first=1, second=0 → 10-bit offset
+            //   first=0           → 15-bit offset (no second bit)
+            const first_bit = try reader.readBit();
+            var offlen: u5 = undefined;
+            if (first_bit == 1) {
+                const second_bit = try reader.readBit();
+                offlen = if (second_bit == 1) 5 else 10;
+            } else {
+                offlen = 15;
             }
+            var ref_offset: usize = 0;
+            for (0..offlen) |i| {
+                const b = try reader.readBit();
+                ref_offset |= @as(usize, b) << @intCast(i);
+            }
+            ref_offset += 1;
 
             // Special case: 10-bit offset with value 1 → raw literal block
-            if (offset_type == 0b00 and ref_offset == 1) {
+            if (offlen == 10 and ref_offset == 1) {
                 // Read raw bytes until 0x00
                 while (out_pos < decomp_len) {
                     const byte = try reader.readByte();

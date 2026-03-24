@@ -141,7 +141,6 @@ pub fn main() !void {
             }
             if (event.type == c.SDL_EVENT_DROP_FILE) {
                 if (event.drop.data) |data| {
-                    defer c.SDL_free(@constCast(data));
                     const path = std.mem.span(data);
                     const new_path = allocator.dupe(u8, path) catch {
                         std.log.err("failed to store dropped cart path", .{});
