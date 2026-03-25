@@ -10,6 +10,10 @@ pub const Input = struct {
     prev_state: [2]u8 = .{ 0, 0 }, // previous frame
     held_frames: [2][8]u16 = .{ .{0} ** 8, .{0} ** 8 }, // frames held
     controllers: [2]?*c.SDL_Gamepad = .{ null, null },
+    mouse_x: i32 = 0,
+    mouse_y: i32 = 0,
+    mouse_buttons: u8 = 0, // bit 0=left, bit 1=right, bit 2=middle
+    mouse_wheel: i32 = 0,
 
     pub fn initControllers(self: *Input) void {
         var num_gamepads: c_int = 0;

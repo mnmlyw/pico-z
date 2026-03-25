@@ -30,6 +30,13 @@ pub const PicoState = struct {
     cart_data_dirty: bool = false,
     allocator: std.mem.Allocator,
     target_fps: u8 = 30,
+
+    // Multi-cart loading
+    pending_load: ?[256]u8 = null,
+    pending_load_len: u8 = 0,
+
+    // Cart directory for relative load() paths
+    cart_dir: ?[]const u8 = null,
 };
 
 pub fn getPico(lua: *zlua.Lua) *PicoState {
@@ -151,6 +158,9 @@ pub fn registerAll(lua: *zlua.Lua, pico: *PicoState) void {
         .{ "dset", wrapFn(api_dset) },
         .{ "menuitem", wrapFn(api_menuitem) },
         .{ "extcmd", wrapFn(api_extcmd) },
+        .{ "load", wrapFn(api_load) },
+        .{ "run", wrapFn(api_run) },
+        .{ "stop", wrapFn(api_stop) },
     };
 
     inline for (funcs) |f| {
@@ -422,7 +432,30 @@ fn api_stat(lua: *zlua.Lua) c_int {
                 lua.pushNumber(@floatFromInt(audio.music_state.tick));
             } else lua.pushNumber(0);
         },
-        32...34 => lua.pushNumber(0), // mouse x, y, buttons
+        32 => {
+            if (pico.memory.ram[0x5F2D] & 1 != 0)
+                lua.pushNumber(@floatFromInt(pico.input.mouse_x))
+            else
+                lua.pushNumber(0);
+        },
+        33 => {
+            if (pico.memory.ram[0x5F2D] & 1 != 0)
+                lua.pushNumber(@floatFromInt(pico.input.mouse_y))
+            else
+                lua.pushNumber(0);
+        },
+        34 => {
+            if (pico.memory.ram[0x5F2D] & 1 != 0)
+                lua.pushNumber(@floatFromInt(pico.input.mouse_buttons))
+            else
+                lua.pushNumber(0);
+        },
+        35 => {
+            if (pico.memory.ram[0x5F2D] & 1 != 0)
+                lua.pushNumber(@floatFromInt(pico.input.mouse_wheel))
+            else
+                lua.pushNumber(0);
+        },
         46...49 => {
             // Same as 16..19 (newer API alias)
             if (pico.audio) |audio| {
@@ -534,6 +567,33 @@ fn api_menuitem(_: *zlua.Lua) c_int {
 }
 
 fn api_extcmd(_: *zlua.Lua) c_int {
+    return 0;
+}
+
+fn api_load(lua: *zlua.Lua) c_int {
+    const pico = getPico(lua);
+    const name = lua.toString(1) catch return 0;
+    if (name.len == 0 or name.len > 255) return 0;
+    var buf: [256]u8 = undefined;
+    @memcpy(buf[0..name.len], name);
+    pico.pending_load = buf;
+    pico.pending_load_len = @intCast(name.len);
+    // Raise error to abort current Lua execution; main loop handles the load
+    _ = lua.raiseErrorStr("cart_load", .{});
+    return 0;
+}
+
+fn api_run(lua: *zlua.Lua) c_int {
+    const pico = getPico(lua);
+    // Signal a reload of the current cart
+    pico.pending_load = [_]u8{0} ** 256;
+    pico.pending_load_len = 0; // empty name = reload current
+    _ = lua.raiseErrorStr("cart_run", .{});
+    return 0;
+}
+
+fn api_stop(_: *zlua.Lua) c_int {
+    // No-op for now — PICO-8 stop() halts execution and returns to editor
     return 0;
 }
 

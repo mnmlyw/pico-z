@@ -493,7 +493,7 @@ fn tryCompoundAssign(allocator: std.mem.Allocator, line: []const u8, pos: usize,
         func_name = if (ch == '>') "shr" else "shl";
         op_len = 3;
     } else if (pos + 1 < line.len and line[pos + 1] == '=') {
-        if (ch == '+' or ch == '-' or ch == '*' or ch == '/' or ch == '%' or ch == '\\') {
+        if (ch == '+' or ch == '-' or ch == '*' or ch == '/' or ch == '%' or ch == '\\' or ch == '^') {
             op = &[_]u8{ch};
             op_len = 2;
         } else if (ch == '|') {

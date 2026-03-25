@@ -1,10 +1,10 @@
-// PICO-8 built-in font: 4x6 pixel glyphs for ASCII 0-127
+// PICO-8 built-in font: 4x6 pixel glyphs for P8SCII 0-255
 // Each glyph is stored as 3 bytes (6 rows x 4 bits = 24 bits)
 // Row 0 is in the high nibble of byte 0, row 1 in the low nibble, etc.
 // Within each nibble, bit 3 = leftmost pixel, bit 0 = rightmost pixel
 
-pub const font_data: [128][3]u8 = init: {
-    var data: [128][3]u8 = .{.{ 0, 0, 0 }} ** 128;
+pub const font_data: [256][3]u8 = init: {
+    var data: [256][3]u8 = .{.{ 0, 0, 0 }} ** 256;
 
     // Space and basic punctuation
     data[32] = .{ 0x00, 0x00, 0x00 }; // space
@@ -111,12 +111,56 @@ pub const font_data: [128][3]u8 = init: {
     data['|'] = .{ 0x44, 0x44, 0x40 }; // |
     data['}'] = .{ 0x84, 0x24, 0x80 }; // }
     data['~'] = .{ 0x5A, 0x00, 0x00 }; // ~
+    data[127] = .{ 0xAE, 0xEE, 0xA0 }; // house/home glyph
+
+    // P8SCII 128-255: PICO-8 extended characters
+    // 128-131: symbols
+    data[128] = .{ 0x69, 0xF9, 0x60 }; // filled circle
+    data[129] = .{ 0x46, 0xF6, 0x40 }; // filled diamond
+    data[130] = .{ 0x0E, 0xE0, 0x00 }; // horizontal bar
+    data[131] = .{ 0x44, 0x44, 0x40 }; // vertical bar
+
+    // 132-135: game characters
+    data[132] = .{ 0x4E, 0xAA, 0xA0 }; // person
+
+    // 133-138: button glyphs / arrows — these are the important ones for games
+    data[133] = .{ 0x04, 0xE4, 0x00 }; // + cross
+    data[134] = .{ 0x4E, 0x40, 0x00 }; // up arrow (small)
+    data[135] = .{ 0x46, 0xE4, 0x00 }; // up-right
+
+    // 136-143: directional arrows (commonly used)
+    data[136] = .{ 0x06, 0xE6, 0x00 }; // right arrow
+    data[137] = .{ 0x06, 0xE4, 0x00 }; // down-right
+    data[138] = .{ 0x04, 0xE4, 0x00 }; // down arrow
+    data[139] = .{ 0x04, 0xE4, 0x00 }; // down-left (approx)
+    data[140] = .{ 0x0C, 0xEC, 0x00 }; // left arrow
+    data[141] = .{ 0x0C, 0xE4, 0x00 }; // up-left
+
+    // 142-143: O and X button glyphs
+    data[142] = .{ 0x6F, 0xF6, 0x00 }; // O button
+    data[143] = .{ 0xA4, 0xAA, 0x40 }; // X button
+
+    // 144-153: more symbols
+    data[144] = .{ 0x46, 0xE6, 0x40 }; // star
+    data[145] = .{ 0x0A, 0xE0, 0x00 }; // infinity-ish
+    data[146] = .{ 0x4A, 0x40, 0x00 }; // mountain
+    data[147] = .{ 0x4E, 0xEA, 0x00 }; // crown
+    data[148] = .{ 0xE8, 0xE2, 0xE0 }; // S
+    data[149] = .{ 0x6A, 0xAA, 0x60 }; // eye
+    data[150] = .{ 0xAA, 0xAE, 0x40 }; // heart (filled)
+    data[151] = .{ 0x04, 0xA4, 0x00 }; // diamond
+    data[152] = .{ 0x4E, 0xA4, 0x00 }; // club
+    data[153] = .{ 0x04, 0xE4, 0x00 }; // spade
+
+    // 154-159: misc
+    data[154] = .{ 0x69, 0x96, 0x00 }; // circle outline
+    data[155] = .{ 0x6A, 0xA6, 0x00 }; // smiley
 
     break :init data;
 };
 
 /// Get pixel at (x, y) within a glyph. Returns true if pixel is set.
-pub fn getPixel(char_code: u7, x: u3, y: u3) bool {
+pub fn getPixel(char_code: u8, x: u3, y: u3) bool {
     if (x >= 4 or y >= 6) return false;
     const glyph = font_data[char_code];
     // Each byte holds 2 rows: high nibble = even row, low nibble = odd row

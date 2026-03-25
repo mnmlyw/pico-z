@@ -265,8 +265,25 @@ pub fn api_circfill(lua: *zlua.Lua) i32 {
 
 fn drawCirc(memory: *Memory, cx: i32, cy: i32, r: i32, col: u4, fill: bool) void {
     if (r < 0) return;
+
+    const cam = getCamera(memory);
+    const acx = cx - cam.x;
+    const acy = cy - cam.y;
+
+    // Check for inverted fill mode (poke(0x5f34, 0x2))
+    const invert = fill and (memory.ram[0x5F34] & 0x2 != 0);
+
     if (r == 0) {
-        putPixel(memory, cx, cy, col);
+        if (invert) {
+            invertFillCirc(memory, acx, acy, 0, col);
+        } else {
+            putPixelRaw(memory, acx, acy, col);
+        }
+        return;
+    }
+
+    if (invert) {
+        invertFillCirc(memory, acx, acy, r, col);
         return;
     }
 
@@ -276,19 +293,19 @@ fn drawCirc(memory: *Memory, cx: i32, cy: i32, r: i32, col: u4, fill: bool) void
 
     while (x >= y) {
         if (fill) {
-            drawLine(memory, cx - x, cy + y, cx + x, cy + y, col);
-            drawLine(memory, cx - x, cy - y, cx + x, cy - y, col);
-            drawLine(memory, cx - y, cy + x, cx + y, cy + x, col);
-            drawLine(memory, cx - y, cy - x, cx + y, cy - x, col);
+            hline(memory, acx - x, acx + x, acy + y, col);
+            hline(memory, acx - x, acx + x, acy - y, col);
+            hline(memory, acx - y, acx + y, acy + x, col);
+            hline(memory, acx - y, acx + y, acy - x, col);
         } else {
-            putPixel(memory, cx + x, cy + y, col);
-            putPixel(memory, cx - x, cy + y, col);
-            putPixel(memory, cx + x, cy - y, col);
-            putPixel(memory, cx - x, cy - y, col);
-            putPixel(memory, cx + y, cy + x, col);
-            putPixel(memory, cx - y, cy + x, col);
-            putPixel(memory, cx + y, cy - x, col);
-            putPixel(memory, cx - y, cy - x, col);
+            putPixelRaw(memory, acx + x, acy + y, col);
+            putPixelRaw(memory, acx - x, acy + y, col);
+            putPixelRaw(memory, acx + x, acy - y, col);
+            putPixelRaw(memory, acx - x, acy - y, col);
+            putPixelRaw(memory, acx + y, acy + x, col);
+            putPixelRaw(memory, acx - y, acy + x, col);
+            putPixelRaw(memory, acx + y, acy - x, col);
+            putPixelRaw(memory, acx - y, acy - x, col);
         }
         y += 1;
         if (d < 0) {
@@ -296,6 +313,37 @@ fn drawCirc(memory: *Memory, cx: i32, cy: i32, r: i32, col: u4, fill: bool) void
         } else {
             x -= 1;
             d += 2 * (y - x) + 1;
+        }
+    }
+}
+
+/// Fast horizontal line fill (screen-space, no camera).
+fn hline(memory: *Memory, x0: i32, x1: i32, y: i32, col: u4) void {
+    var sx = x0;
+    while (sx <= x1) : (sx += 1) {
+        putPixelRaw(memory, sx, y, col);
+    }
+}
+
+/// Fill everything OUTSIDE a circle (inverted circfill for peephole effects).
+fn invertFillCirc(memory: *Memory, cx: i32, cy: i32, r: i32, col: u4) void {
+    const clip = getClip(memory);
+
+    var sy: i32 = clip.y0;
+    while (sy < clip.y1) : (sy += 1) {
+        const dy = sy - cy;
+        if (dy < -r or dy > r) {
+            // Scanline entirely outside circle — fill whole line
+            hline(memory, clip.x0, clip.x1 - 1, sy, col);
+        } else {
+            // Scanline intersects circle — fill left and right of circle
+            const dy2 = dy * dy;
+            const r2 = r * r;
+            const dx = std.math.sqrt(@as(f64, @floatFromInt(r2 - dy2)));
+            const left = cx - @as(i32, @intFromFloat(dx));
+            const right = cx + @as(i32, @intFromFloat(dx));
+            if (clip.x0 < left) hline(memory, clip.x0, left - 1, sy, col);
+            if (right + 1 < clip.x1) hline(memory, right + 1, clip.x1 - 1, sy, col);
         }
     }
 }
@@ -603,20 +651,91 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
     const cam = getCamera(memory);
     var x = start_x - cam.x;
     var y = start_y - cam.y;
-    for (text) |ch| {
-        if (ch == '\n') {
-            x = start_x - cam.x;
-            y += 6;
-            continue;
+    var color = col;
+    var char_w: i32 = 4;
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        i += 1;
+        switch (ch) {
+            0x01 => { // \* repeat next char N times
+                if (i + 1 < text.len) {
+                    const count = text[i];
+                    const rch = text[i + 1];
+                    i += 2;
+                    for (0..count) |_| {
+                        drawChar(memory, rch, x, y, color);
+                        x += char_w;
+                    }
+                }
+            },
+            0x02 => { // \# draw char at x,y offset
+                if (i + 2 < text.len) {
+                    const ox: i32 = @as(i32, @as(i8, @bitCast(text[i])));
+                    const oy: i32 = @as(i32, @as(i8, @bitCast(text[i + 1])));
+                    const dch = text[i + 2];
+                    i += 3;
+                    drawChar(memory, dch, x + ox, y + oy, color);
+                }
+            },
+            0x03 => { // \- move cursor horizontally
+                if (i < text.len) {
+                    x += @as(i32, @as(i8, @bitCast(text[i])));
+                    i += 1;
+                }
+            },
+            0x04 => { // \| move cursor vertically
+                if (i < text.len) {
+                    y += @as(i32, @as(i8, @bitCast(text[i])));
+                    i += 1;
+                }
+            },
+            0x05 => { // \+ move cursor to x,y
+                if (i + 1 < text.len) {
+                    x = start_x - cam.x + @as(i32, text[i]);
+                    y = start_y - cam.y + @as(i32, text[i + 1]);
+                    i += 2;
+                }
+            },
+            0x06 => { // \^ special commands — skip command byte
+                if (i < text.len) {
+                    // Various sub-commands (decoration, width, etc.)
+                    const cmd = text[i];
+                    i += 1;
+                    switch (cmd) {
+                        'w' => char_w = 8, // wide mode
+                        't' => char_w = 4, // tall/normal mode
+                        'g' => {}, // TODO: custom font
+                        'j', 'k' => {}, // TODO: scroll/wrap modes
+                        else => {},
+                    }
+                }
+            },
+            0x08 => x -= char_w, // \b backspace
+            0x09 => x = (x & ~@as(i32, 15)) + 16, // \t tab
+            0x0a => { // \n newline
+                x = start_x - cam.x;
+                y += 6;
+            },
+            0x0c => { // \f set foreground color
+                if (i < text.len) {
+                    color = @truncate(text[i] & 0x0f);
+                    i += 1;
+                }
+            },
+            0x0d => x = start_x - cam.x, // \r carriage return
+            0x0e => char_w = 8, // switch to wide font
+            0x0f => char_w = 4, // switch to normal font
+            else => {
+                drawChar(memory, ch, x, y, color);
+                x += char_w;
+            },
         }
-        const code: u7 = if (ch > 127) 0 else @intCast(ch);
-        drawChar(memory, code, x, y, col);
-        x += 4;
     }
     return x + cam.x;
 }
 
-fn drawChar(memory: *Memory, code: u7, x: i32, y: i32, col: u4) void {
+fn drawChar(memory: *Memory, code: u8, x: i32, y: i32, col: u4) void {
     var py: u3 = 0;
     while (py < 6) : (py += 1) {
         var px: u3 = 0;

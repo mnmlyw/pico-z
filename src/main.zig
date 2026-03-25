@@ -106,6 +106,7 @@ pub fn main() !void {
         loadCart(&lua_engine, &memory, allocator, path) catch |err| {
             std.log.err("failed to load cart: {}", .{err});
         };
+        pico.cart_dir = std.fs.path.dirname(path);
     }
 
     // Main loop
@@ -150,6 +151,7 @@ pub fn main() !void {
                         if (owned_cart_path) |p| allocator.free(p);
                         owned_cart_path = new_path;
                         current_cart_path = new_path;
+                        pico.cart_dir = std.fs.path.dirname(new_path);
                         if (pico.cart_data_id) |id| {
                             allocator.free(id);
                             pico.cart_data_id = null;
@@ -165,6 +167,29 @@ pub fn main() !void {
                 input.deinitControllers();
                 input.initControllers();
             }
+            if (event.type == c.SDL_EVENT_MOUSE_MOTION) {
+                var lx: f32 = event.motion.x;
+                var ly: f32 = event.motion.y;
+                _ = c.SDL_RenderCoordinatesFromWindow(renderer, lx, ly, &lx, &ly);
+                input.mouse_x = @intFromFloat(lx);
+                input.mouse_y = @intFromFloat(ly);
+            }
+            if (event.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN or event.type == c.SDL_EVENT_MOUSE_BUTTON_UP) {
+                const bit: u8 = switch (event.button.button) {
+                    c.SDL_BUTTON_LEFT => 1,
+                    c.SDL_BUTTON_RIGHT => 2,
+                    c.SDL_BUTTON_MIDDLE => 4,
+                    else => 0,
+                };
+                if (event.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    input.mouse_buttons |= bit;
+                } else {
+                    input.mouse_buttons &= ~bit;
+                }
+            }
+            if (event.type == c.SDL_EVENT_MOUSE_WHEEL) {
+                input.mouse_wheel = @intFromFloat(event.wheel.y);
+            }
         }
 
         // Update input and sync to PICO-8 memory
@@ -175,6 +200,50 @@ pub fn main() !void {
         // Run cart
         lua_engine.callUpdate();
         lua_engine.callDraw();
+
+        // Handle multi-cart load() requests
+        if (pico.pending_load != null) {
+            const name_buf = pico.pending_load.?;
+            const name_len = pico.pending_load_len;
+            pico.pending_load = null;
+            pico.pending_load_len = 0;
+
+            if (name_len == 0) {
+                // run() — reload current cart
+                if (current_cart_path) |path| {
+                    loadCart(&lua_engine, &memory, allocator, path) catch |err| {
+                        std.log.err("run() reload failed: {}", .{err});
+                    };
+                }
+            } else {
+                // load("name") — load new cart
+                const name = name_buf[0..name_len];
+
+                // Resolve path relative to current cart directory
+                const load_path = if (pico.cart_dir) |dir|
+                    std.fs.path.join(allocator, &.{ dir, name }) catch null
+                else
+                    null;
+                const path = load_path orelse allocator.dupe(u8, name) catch null;
+
+                if (path) |p| {
+                    if (loadCart(&lua_engine, &memory, allocator, p)) |_| {
+                        if (owned_cart_path) |old| allocator.free(old);
+                        owned_cart_path = p;
+                        current_cart_path = p;
+                        pico.cart_dir = std.fs.path.dirname(p);
+                        if (pico.cart_data_id) |id| {
+                            allocator.free(id);
+                            pico.cart_data_id = null;
+                        }
+                        pico.cart_data_dirty = false;
+                    } else |err| {
+                        allocator.free(p);
+                        std.log.err("load() failed for {s}: {}", .{ name, err });
+                    }
+                }
+            }
+        }
 
         // Flush dirty cartdata once per frame
         if (pico.cart_data_dirty) {
@@ -282,12 +351,11 @@ fn displayError(memory: *Memory, msg: []const u8) void {
 
 fn drawCharDirect(memory: *Memory, ch: u8, x: i32, y: i32, col: u4) void {
     const font = @import("gfx_font.zig");
-    const code: u7 = if (ch > 127) 0 else @intCast(ch);
     var py: u3 = 0;
     while (py < 6) : (py += 1) {
         var px: u3 = 0;
         while (px < 4) : (px += 1) {
-            if (font.getPixel(code, px, py)) {
+            if (font.getPixel(ch, px, py)) {
                 const sx = x + px;
                 const sy = y + py;
                 if (sx >= 0 and sx < 128 and sy >= 0 and sy < 128) {

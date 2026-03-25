@@ -21,6 +21,7 @@ pub const LuaEngine = struct {
     pub fn init(allocator: std.mem.Allocator, pico: *api.PicoState) !LuaEngine {
         const lua = try zlua.Lua.init(allocator);
         lua.openLibs();
+        sandboxGlobals(lua);
 
         api.registerAll(lua, pico);
 
@@ -43,6 +44,12 @@ pub const LuaEngine = struct {
         // Store processed source for reinit (free old one if any)
         if (self.processed_source) |old| allocator.free(old);
         self.processed_source = processed;
+
+        // Debug: dump preprocessed source
+        if (std.fs.cwd().createFile("/tmp/preprocessed.lua", .{})) |f| {
+            defer f.close();
+            f.writeAll(processed) catch {};
+        } else |_| {}
 
         // Load and execute the processed code
         self.lua.loadBuffer(processed, "cart", .text) catch {
@@ -92,6 +99,15 @@ pub const LuaEngine = struct {
             return;
         };
         self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+            // Check if this is a cart load/run signal (not a real error)
+            if (self.lua.toString(-1)) |msg| {
+                if (std.mem.indexOf(u8, msg, "cart_load") != null or
+                    std.mem.indexOf(u8, msg, "cart_run") != null)
+                {
+                    self.lua.pop(1);
+                    return; // Not a real error — main loop will handle the load
+                }
+            } else |_| {}
             self.captureError();
             std.log.err("lua runtime error in {s}: {s}", .{ name, self.getErrorMsg() });
             return;
@@ -126,12 +142,35 @@ pub const LuaEngine = struct {
         return self.has_update60;
     }
 
+    /// Remove standard Lua libraries/globals that PICO-8 doesn't expose.
+    fn sandboxGlobals(lua: *zlua.Lua) void {
+        const blocked = [_][:0]const u8{
+            "io",
+            "os",
+            "debug",
+            "package",
+            "require",
+            "module",
+            "dofile",
+            "loadfile",
+            "load",
+            "collectgarbage",
+            "coroutine",
+            "math",
+        };
+        for (blocked) |name| {
+            lua.pushNil();
+            lua.setGlobal(name);
+        }
+    }
+
     /// Destroy and recreate the Lua VM, re-execute cart source (without calling _init).
     /// Used by save state load to recreate all functions before restoring globals.
     pub fn reinit(self: *LuaEngine) !void {
         self.lua.deinit();
         self.lua = try zlua.Lua.init(self.allocator);
         self.lua.openLibs();
+        sandboxGlobals(self.lua);
         api.registerAll(self.lua, self.pico);
 
         self.had_error = false;
