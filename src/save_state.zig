@@ -282,7 +282,8 @@ const lua_serializer =
     \\peek=1,poke=1,peek2=1,poke2=1,peek4=1,poke4=1,
     \\memcpy=1,memset=1,reload=1,cstore=1,
     \\sfx=1,music=1,stat=1,time=1,t=1,printh=1,
-    \\cartdata=1,dget=1,dset=1,menuitem=1,extcmd=1}
+    \\cartdata=1,dget=1,dset=1,menuitem=1,extcmd=1,
+    \\load=1,run=1,stop=1}
     \\local _gn={}
     \\for k,v in pairs(_G) do
     \\  if type(k)=="string" and type(v)=="table" and not _sk[k] then
@@ -309,7 +310,7 @@ const lua_serializer =
     \\    end
     \\    for k2,v2 in pairs(v) do
     \\      if type(v2)~="function" then
-    \\        local ia=type(k2)=="number" and k2>=1 and k2<=n and k2==math.floor(k2)
+    \\        local ia=type(k2)=="number" and k2>=1 and k2<=n and k2==flr(k2)
     \\        if not ia then
     \\          if type(k2)=="string" then
     \\            p[#p+1]=string.format("[%q]=",k2).._s(v2,d+1,seen)
