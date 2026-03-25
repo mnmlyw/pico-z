@@ -16,4 +16,5 @@ Controls:
   X / V         X button
   P             Save state
   L             Load state
+  R             Reload cart from disk
   ESC           Quit
