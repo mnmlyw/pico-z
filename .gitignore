@@ -7,3 +7,4 @@ dist/
 *.p8.png
 *.sav
 carts/
+.pico-z-cartdata/
