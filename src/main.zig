@@ -139,6 +139,14 @@ pub fn main() !void {
                         }
                     }
                 }
+                if (event.key.key == c.SDLK_R) {
+                    if (current_cart_path) |path| {
+                        loadCart(&lua_engine, &memory, allocator, path) catch |err| {
+                            std.log.err("cart reload failed: {}", .{err});
+                        };
+                        indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                    }
+                }
             }
             if (event.type == c.SDL_EVENT_DROP_FILE) {
                 if (event.drop.data) |data| {
