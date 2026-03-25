@@ -8,6 +8,8 @@ pub fn preprocess(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
 
     var in_long_comment = false;
     var long_comment_level: usize = 0;
+    var in_long_string = false;
+    var long_string_level: usize = 0;
 
     var lines = std.mem.splitScalar(u8, source, '\n');
     var first_line = true;
@@ -21,20 +23,182 @@ pub fn preprocess(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
                 in_long_comment = false;
                 // Process rest of line after comment close
                 if (end_pos < raw_line.len) {
-                    try processLine(allocator, raw_line[end_pos..], &out, &in_long_comment, &long_comment_level);
+                    try preprocessAndProcessLine(allocator, raw_line[end_pos..], &out, &in_long_comment, &long_comment_level, &in_long_string, &long_string_level);
                 }
             }
             // If still in long comment, skip entire line
             continue;
         }
 
-        try processLine(allocator, raw_line, &out, &in_long_comment, &long_comment_level);
+        if (in_long_string) {
+            // Emit verbatim until we find the closing ]=*]
+            if (findLongClose(raw_line, long_string_level)) |end_pos| {
+                // Emit everything up to and including the close bracket
+                try out.appendSlice(allocator, raw_line[0..end_pos]);
+                in_long_string = false;
+                // Process rest of line after long string close
+                if (end_pos < raw_line.len) {
+                    try preprocessAndProcessLine(allocator, raw_line[end_pos..], &out, &in_long_comment, &long_comment_level, &in_long_string, &long_string_level);
+                }
+            } else {
+                // Still in long string - emit entire line verbatim
+                try out.appendSlice(allocator, raw_line);
+            }
+            continue;
+        }
+
+        try preprocessAndProcessLine(allocator, raw_line, &out, &in_long_comment, &long_comment_level, &in_long_string, &long_string_level);
     }
 
-    return out.toOwnedSlice(allocator);
+    const raw_output = try out.toOwnedSlice(allocator);
+    defer allocator.free(raw_output);
+
+    // Post-pass: insert spaces between number literals and identifiers.
+    // PICO-8 allows e.g. "32767for" or ".5and" but Lua 5.2 sees malformed numbers.
+    return insertNumberSpaces(allocator, raw_output);
 }
 
-fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in_long_comment: *bool, long_comment_level: *usize) !void {
+/// Insert a space between number literals and immediately following identifiers.
+/// Operates on already-preprocessed output so strings are already properly formed.
+fn insertNumberSpaces(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+    var result: OutList = .empty;
+    errdefer result.deinit(allocator);
+
+    var i: usize = 0;
+    var in_str: u8 = 0;
+    var in_long_str = false;
+    var long_str_level: usize = 0;
+
+    while (i < source.len) {
+        const ch = source[i];
+
+        // Track long strings
+        if (in_long_str) {
+            if (ch == ']' and matchLongClose(source, i, long_str_level)) {
+                const close_len = long_str_level + 2;
+                try result.appendSlice(allocator, source[i .. i + close_len]);
+                i += close_len;
+                in_long_str = false;
+            } else {
+                try result.append(allocator, ch);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Track strings
+        if (in_str != 0) {
+            if (ch == '\\' and i + 1 < source.len) {
+                try result.append(allocator, ch);
+                i += 1;
+                try result.append(allocator, source[i]);
+                i += 1;
+                continue;
+            }
+            if (ch == in_str) in_str = 0;
+            try result.append(allocator, ch);
+            i += 1;
+            continue;
+        }
+        if (ch == '"' or ch == '\'') {
+            in_str = ch;
+            try result.append(allocator, ch);
+            i += 1;
+            continue;
+        }
+        if (ch == '[') {
+            if (matchLongOpen(source, i)) |level| {
+                in_long_str = true;
+                long_str_level = level;
+                const open_len = level + 2;
+                try result.appendSlice(allocator, source[i .. i + open_len]);
+                i += open_len;
+                continue;
+            }
+        }
+
+        // Skip comments (-- to end of line)
+        if (ch == '-' and i + 1 < source.len and source[i + 1] == '-') {
+            // Find end of line
+            const line_end = std.mem.indexOfScalar(u8, source[i..], '\n') orelse source.len - i;
+            try result.appendSlice(allocator, source[i .. i + line_end]);
+            i += line_end;
+            continue;
+        }
+
+        // Check for number literal start (outside strings)
+        const is_num_start = blk: {
+            if (std.ascii.isDigit(ch)) {
+                // Digit starts a number if not preceded by alpha/underscore/dot
+                break :blk (i == 0 or (!std.ascii.isAlphanumeric(source[i - 1]) and source[i - 1] != '_' and source[i - 1] != '.'));
+            }
+            if (ch == '.' and i + 1 < source.len and std.ascii.isDigit(source[i + 1])) {
+                // ".5" style number — only if not part of a larger number (e.g. "1.5")
+                // In Lua, "obj.5" is invalid syntax, so ".5" after any non-digit/dot is a number.
+                break :blk (i == 0 or (!std.ascii.isDigit(source[i - 1]) and source[i - 1] != '.' and !std.ascii.isHex(source[i - 1])));
+            }
+            break :blk false;
+        };
+
+        if (is_num_start) {
+            var end = i;
+            if (ch == '0' and end + 1 < source.len and (source[end + 1] == 'x' or source[end + 1] == 'X')) {
+                // Hex literal: 0x[0-9a-fA-F]+ with optional fractional part
+                end += 2;
+                while (end < source.len and (std.ascii.isHex(source[end]) or source[end] == '.')) : (end += 1) {}
+            } else if (ch == '0' and end + 1 < source.len and (source[end + 1] == 'b' or source[end + 1] == 'B')) {
+                // Binary literal: 0b[01.]+ (PICO-8 extension)
+                end += 2;
+                while (end < source.len and (source[end] == '0' or source[end] == '1' or source[end] == '.')) : (end += 1) {}
+            } else {
+                // Decimal literal: [0-9]*[.][0-9]*
+                while (end < source.len and (std.ascii.isDigit(source[end]) or source[end] == '.')) : (end += 1) {}
+            }
+            try result.appendSlice(allocator, source[i..end]);
+            // Insert space if followed by alpha/underscore to prevent lexer confusion
+            if (end < source.len and (std.ascii.isAlphabetic(source[end]) or source[end] == '_')) {
+                try result.append(allocator, ' ');
+            }
+            i = end;
+            continue;
+        }
+
+        // Insert space between closing bracket/paren and identifier start.
+        // E.g. "F(l)t" -> "F(l) t" — these are separate tokens in PICO-8.
+        // Do NOT insert before '.' (field access) or digits (indexing).
+        if ((ch == ')' or ch == ']') and i + 1 < source.len) {
+            try result.append(allocator, ch);
+            i += 1;
+            const next = source[i];
+            if (std.ascii.isAlphabetic(next) or next == '_') {
+                try result.append(allocator, ' ');
+            }
+            continue;
+        }
+
+        try result.append(allocator, ch);
+        i += 1;
+    }
+
+    return result.toOwnedSlice(allocator);
+}
+
+/// Apply pre-passes (token spacing, short-if/while expansion) and then process a line.
+fn preprocessAndProcessLine(allocator: std.mem.Allocator, raw_line: []const u8, out: *OutList, in_long_comment: *bool, long_comment_level: *usize, in_long_string: *bool, long_string_level: *usize) !void {
+    // Pre-pass 1: Insert spaces between tokens that PICO-8 allows adjacent
+    // but Lua 5.2 doesn't (e.g. "32767for", ".5and", ")t").
+    const spaced_line = insertNumberSpaces(allocator, raw_line) catch null;
+    defer if (spaced_line) |s| allocator.free(s);
+
+    // Pre-pass 2: Expand PICO-8 short-if/short-while.
+    const line_after_spaces = spaced_line orelse raw_line;
+    const expanded_line = expandShortIfs(allocator, line_after_spaces) catch null;
+    defer if (expanded_line) |e| allocator.free(e);
+
+    try processLine(allocator, expanded_line orelse line_after_spaces, out, in_long_comment, long_comment_level, in_long_string, long_string_level);
+}
+
+fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in_long_comment: *bool, long_comment_level: *usize, in_long_string: *bool, long_string_level: *usize) !void {
     const trimmed = std.mem.trimLeft(u8, line, " \t");
 
     // ?msg -> print(msg)
@@ -47,24 +211,19 @@ fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in
         return;
     }
 
-    // Short-if: if (cond) stmt -> if cond then stmt end
-    if (tryShortIf(allocator, trimmed, out, line.len - trimmed.len)) return;
-
     var i: usize = 0;
     var in_string: u8 = 0;
-    var in_long_string = false;
-    var long_string_level: usize = 0;
 
     while (i < line.len) {
         const ch = line[i];
 
         // Handle long string
-        if (in_long_string) {
-            if (ch == ']' and matchLongClose(line, i, long_string_level)) {
-                const close_len = long_string_level + 2;
+        if (in_long_string.*) {
+            if (ch == ']' and matchLongClose(line, i, long_string_level.*)) {
+                const close_len = long_string_level.* + 2;
                 try out.appendSlice(allocator, line[i .. i + close_len]);
                 i += close_len;
-                in_long_string = false;
+                in_long_string.* = false;
             } else {
                 try out.append(allocator, ch);
                 i += 1;
@@ -75,11 +234,23 @@ fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in
         // Handle string
         if (in_string != 0) {
             if (ch == '\\') {
-                try out.append(allocator, ch);
                 i += 1;
                 if (i < line.len) {
-                    try out.append(allocator, line[i]);
+                    const next = line[i];
+                    if (isValidLua52Escape(next)) {
+                        // Valid Lua 5.2 escape — pass through verbatim
+                        try out.append(allocator, '\\');
+                        try out.append(allocator, next);
+                    } else {
+                        // PICO-8-specific escape (e.g. \^, \*, \#, \-, \|, \+)
+                        // Emit backslash as \092 so Lua 5.2 sees a literal '\' byte,
+                        // followed by the command character as-is.
+                        try out.appendSlice(allocator, "\\092");
+                        try out.append(allocator, next);
+                    }
                     i += 1;
+                } else {
+                    try out.append(allocator, '\\');
                 }
                 continue;
             }
@@ -126,8 +297,8 @@ fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in
         // Start long string
         if (ch == '[') {
             if (matchLongOpen(line, i)) |level| {
-                in_long_string = true;
-                long_string_level = level;
+                in_long_string.* = true;
+                long_string_level.* = level;
                 const open_len = level + 2;
                 try out.appendSlice(allocator, line[i .. i + open_len]);
                 i += open_len;
@@ -237,6 +408,66 @@ fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in
             }
         }
 
+        // Single-char bitwise infix: & -> band(), | -> bor()
+        // Must come after compound assignment check (so &= and |= are handled first)
+        if (ch == '&' and !(i + 1 < line.len and line[i + 1] == '=')) {
+            if (tryBitwiseOp(allocator, line, i, 1, "band", out)) |new_i| {
+                i = new_i;
+                continue;
+            }
+        }
+        if (ch == '|' and !(i + 1 < line.len and line[i + 1] == '=')) {
+            if (tryBitwiseOp(allocator, line, i, 1, "bor", out)) |new_i| {
+                i = new_i;
+                continue;
+            }
+        }
+
+        // Unary bitwise NOT: ~expr -> bnot(expr)
+        // Must distinguish from ~= (not-equal, already valid Lua)
+        if (ch == '~' and !(i + 1 < line.len and line[i + 1] == '=')) {
+            const expr_info = extractSimpleExpr(line, i + 1);
+            if (expr_info.expr.len > 0) {
+                try out.appendSlice(allocator, "bnot(");
+                try out.appendSlice(allocator, expr_info.expr);
+                try out.append(allocator, ')');
+                i = expr_info.end;
+                continue;
+            }
+        }
+
+        // Number literals: consume entirely and insert space before following identifier
+        // to avoid Lua 5.2 lexer treating e.g. "32767for" or ".5and" as malformed numbers.
+        const is_num_start = blk: {
+            if (std.ascii.isDigit(ch)) {
+                // Digit starts a number if not preceded by alpha/underscore/dot
+                break :blk (i == 0 or (!std.ascii.isAlphanumeric(line[i - 1]) and line[i - 1] != '_' and line[i - 1] != '.'));
+            }
+            if (ch == '.' and i + 1 < line.len and std.ascii.isDigit(line[i + 1])) {
+                // ".5" style number — only if not part of a larger number (e.g. "1.5")
+                break :blk (i == 0 or (!std.ascii.isDigit(line[i - 1]) and line[i - 1] != '.' and !std.ascii.isHex(line[i - 1])));
+            }
+            break :blk false;
+        };
+        if (is_num_start) {
+            var end = i;
+            if (ch == '0' and end + 1 < line.len and (line[end + 1] == 'x' or line[end + 1] == 'X')) {
+                // Hex literal: 0x[0-9a-fA-F]+ with optional fractional part
+                end += 2;
+                while (end < line.len and (std.ascii.isHex(line[end]) or line[end] == '.')) : (end += 1) {}
+            } else {
+                // Decimal literal (possibly starting with '.'): [0-9]*[.][0-9]*
+                while (end < line.len and (std.ascii.isDigit(line[end]) or line[end] == '.')) : (end += 1) {}
+            }
+            try out.appendSlice(allocator, line[i..end]);
+            // Insert space if followed by alpha/underscore to prevent lexer confusion
+            if (end < line.len and (std.ascii.isAlphabetic(line[end]) or line[end] == '_')) {
+                try out.append(allocator, ' ');
+            }
+            i = end;
+            continue;
+        }
+
         try out.append(allocator, ch);
         i += 1;
     }
@@ -292,7 +523,20 @@ fn tryCompoundAssign(allocator: std.mem.Allocator, line: []const u8, pos: usize,
     const rhs_start = pos + op_len;
     const rhs_info = extractRHS(line, rhs_start);
     const rhs = rhs_info.rhs;
-    if (rhs.len == 0) return null;
+
+    // If RHS is empty (continues on next line), only handle simple op cases
+    // where we can emit "lhs = lhs op" and let the next line continue the expression
+    if (rhs.len == 0) {
+        if (is_func or ch == '\\') return null;
+        // Remove LHS + trailing whitespace from output
+        out.shrinkRetainingCapacity(out.items.len - lhs_result.remove_count);
+        out.appendSlice(allocator, lhs) catch return null;
+        out.appendSlice(allocator, " = ") catch return null;
+        out.appendSlice(allocator, lhs) catch return null;
+        out.append(allocator, ' ') catch return null;
+        out.appendSlice(allocator, op) catch return null;
+        return rhs_info.end;
+    }
 
     // Remove LHS + trailing whitespace from output
     out.shrinkRetainingCapacity(out.items.len - lhs_result.remove_count);
@@ -328,126 +572,155 @@ fn tryCompoundAssign(allocator: std.mem.Allocator, line: []const u8, pos: usize,
     return rhs_info.end;
 }
 
-fn tryShortIf(allocator: std.mem.Allocator, trimmed: []const u8, out: *OutList, indent: usize) bool {
-    // Match: if (cond) stmt   where there's no 'then' on the line
-    if (!startsWith(trimmed, "if")) return false;
-    if (trimmed.len < 3) return false;
+const ShortKw = struct {
+    keyword: []const u8,
+    len: usize,
+    separator: []const u8,
+};
 
-    var i: usize = 2;
-    // Skip spaces after 'if'
-    while (i < trimmed.len and (trimmed[i] == ' ' or trimmed[i] == '\t')) : (i += 1) {}
-    if (i >= trimmed.len or trimmed[i] != '(') return false;
-
-    // Check no 'then' on this line (outside strings)
-    if (containsKeyword(trimmed, "then")) return false;
-
-    // Find matching close paren
-    var depth: i32 = 0;
-    var j = i;
-    while (j < trimmed.len) : (j += 1) {
-        if (trimmed[j] == '(') depth += 1;
-        if (trimmed[j] == ')') {
-            depth -= 1;
-            if (depth == 0) break;
-        }
-    }
-    if (depth != 0) return false;
-
-    const cond = trimmed[i + 1 .. j]; // inside parens
-    const rest_start = j + 1;
-    const rest = std.mem.trim(u8, trimmed[rest_start..], " \t");
-    if (rest.len == 0) return false;
-
-    // Check for else clause: "if (cond) stmt1 else stmt2"
-    var stmt1 = rest;
-    var stmt2: ?[]const u8 = null;
-    if (findKeywordInStmt(rest, "else")) |else_pos| {
-        stmt1 = std.mem.trim(u8, rest[0..else_pos], " \t");
-        stmt2 = std.mem.trim(u8, rest[else_pos + 4 ..], " \t");
-    }
-
-    // Write: [indent]if cond then stmt1 [else stmt2] end
-    var k: usize = 0;
-    while (k < indent) : (k += 1) {
-        out.append(allocator, ' ') catch return false;
-    }
-    out.appendSlice(allocator, "if ") catch return false;
-    out.appendSlice(allocator, cond) catch return false;
-    out.appendSlice(allocator, " then ") catch return false;
-    out.appendSlice(allocator, stmt1) catch return false;
-    if (stmt2) |s2| {
-        out.appendSlice(allocator, " else ") catch return false;
-        out.appendSlice(allocator, s2) catch return false;
-    }
-    out.appendSlice(allocator, " end") catch return false;
+/// Check if a keyword matches at the given position with proper word boundaries.
+fn matchKeywordAt(line: []const u8, pos: usize, keyword: []const u8) bool {
+    if (pos + keyword.len > line.len) return false;
+    if (!std.mem.eql(u8, line[pos .. pos + keyword.len], keyword)) return false;
+    // Word boundary before
+    if (pos > 0 and (std.ascii.isAlphanumeric(line[pos - 1]) or line[pos - 1] == '_')) return false;
+    // Word boundary after
+    if (pos + keyword.len < line.len and (std.ascii.isAlphanumeric(line[pos + keyword.len]) or line[pos + keyword.len] == '_')) return false;
     return true;
 }
 
-fn findKeywordInStmt(text: []const u8, keyword: []const u8) ?usize {
+/// Expand PICO-8 short-if syntax on a line.
+/// Short-if: `if (cond) body` (no `then` keyword) -> `if cond then body end`
+/// Can appear mid-line and can be nested.
+/// Returns null if no short-ifs found, otherwise a newly allocated line.
+fn expandShortIfs(allocator: std.mem.Allocator, line: []const u8) !?[]const u8 {
+    // Quick check: does the line contain "if" or "while" at all?
+    if (std.mem.indexOf(u8, line, "if") == null and std.mem.indexOf(u8, line, "while") == null) return null;
+
+    var result: OutList = .empty;
+    errdefer result.deinit(allocator);
+
+    var ends_needed: usize = 0;
     var i: usize = 0;
-    var depth: i32 = 0;
     var in_str: u8 = 0;
-    while (i < text.len) {
-        const ch = text[i];
+
+    while (i < line.len) {
+        const ch = line[i];
+
+        // Track strings
         if (in_str != 0) {
-            if (ch == '\\') {
-                i += 2;
+            if (ch == '\\' and i + 1 < line.len) {
+                try result.append(allocator, ch);
+                i += 1;
+                try result.append(allocator, line[i]);
+                i += 1;
                 continue;
             }
             if (ch == in_str) in_str = 0;
+            try result.append(allocator, ch);
             i += 1;
             continue;
         }
         if (ch == '"' or ch == '\'') {
             in_str = ch;
+            try result.append(allocator, ch);
             i += 1;
             continue;
         }
-        if (ch == '(' or ch == '[') {
-            depth += 1;
-        } else if (ch == ')' or ch == ']') {
-            if (depth > 0) depth -= 1;
+
+        // Skip comments
+        if (ch == '-' and i + 1 < line.len and line[i + 1] == '-') {
+            // Rest of line is a comment, emit verbatim
+            try result.appendSlice(allocator, line[i..]);
+            break;
         }
-        if (depth == 0 and i + keyword.len <= text.len) {
-            if (std.mem.eql(u8, text[i .. i + keyword.len], keyword)) {
-                if (i > 0 and (std.ascii.isAlphanumeric(text[i - 1]) or text[i - 1] == '_')) {
-                    i += 1;
-                    continue;
+
+        // Check for short-if: if(cond) body -> if cond then body end
+        // Check for short-while: while(cond) body -> while cond do body end
+        const short_kw: ?ShortKw = if (ch == 'i' and matchKeywordAt(line, i, "if"))
+            ShortKw{ .keyword = "if", .len = 2, .separator = "then" }
+        else if (ch == 'w' and matchKeywordAt(line, i, "while"))
+            ShortKw{ .keyword = "while", .len = 5, .separator = "do" }
+        else
+            null;
+        if (short_kw) |kw| {
+            // Skip whitespace after keyword
+            var j = i + kw.len;
+            while (j < line.len and (line[j] == ' ' or line[j] == '\t')) : (j += 1) {}
+
+            if (j < line.len and line[j] == '(') {
+                // Find matching close paren
+                var depth: i32 = 0;
+                var k = j;
+                var paren_str: u8 = 0;
+                while (k < line.len) : (k += 1) {
+                    if (paren_str != 0) {
+                        if (line[k] == '\\' and k + 1 < line.len) {
+                            k += 1;
+                            continue;
+                        }
+                        if (line[k] == paren_str) paren_str = 0;
+                        continue;
+                    }
+                    if (line[k] == '"' or line[k] == '\'') {
+                        paren_str = line[k];
+                        continue;
+                    }
+                    if (line[k] == '(') depth += 1;
+                    if (line[k] == ')') {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    }
                 }
-                if (i + keyword.len < text.len and (std.ascii.isAlphanumeric(text[i + keyword.len]) or text[i + keyword.len] == '_')) {
-                    i += 1;
-                    continue;
+
+                if (depth == 0 and k < line.len) {
+                    // k points to closing ')'
+                    // Check if separator keyword follows (skip whitespace)
+                    var after = k + 1;
+                    while (after < line.len and (line[after] == ' ' or line[after] == '\t')) : (after += 1) {}
+
+                    const sep_len = kw.separator.len;
+                    const has_sep = after + sep_len <= line.len and
+                        std.mem.eql(u8, line[after .. after + sep_len], kw.separator) and
+                        (after + sep_len >= line.len or (!std.ascii.isAlphanumeric(line[after + sep_len]) and line[after + sep_len] != '_'));
+
+                    if (!has_sep) {
+                        // Short form detected! Check if body is non-empty
+                        const body_start = k + 1;
+                        const rest = std.mem.trimLeft(u8, line[body_start..], " \t");
+                        if (rest.len > 0) {
+                            // Emit: keyword COND separator
+                            try result.appendSlice(allocator, kw.keyword);
+                            try result.append(allocator, ' ');
+                            try result.appendSlice(allocator, line[j + 1 .. k]); // condition (inside parens)
+                            try result.append(allocator, ' ');
+                            try result.appendSlice(allocator, kw.separator);
+                            try result.append(allocator, ' ');
+                            ends_needed += 1;
+                            i = body_start;
+                            continue;
+                        }
+                    }
                 }
-                return i;
             }
         }
+
+        try result.append(allocator, ch);
         i += 1;
     }
-    return null;
-}
 
-fn startsWith(s: []const u8, prefix: []const u8) bool {
-    if (s.len < prefix.len) return false;
-    if (!std.mem.eql(u8, s[0..prefix.len], prefix)) return false;
-    // Must not be followed by alnum or _
-    if (s.len > prefix.len) {
-        const next = s[prefix.len];
-        if (std.ascii.isAlphanumeric(next) or next == '_') return false;
+    if (ends_needed == 0) {
+        result.deinit(allocator);
+        return null;
     }
-    return true;
-}
 
-fn containsKeyword(line: []const u8, keyword: []const u8) bool {
-    var i: usize = 0;
-    while (i + keyword.len <= line.len) : (i += 1) {
-        if (std.mem.eql(u8, line[i .. i + keyword.len], keyword)) {
-            // Check word boundaries
-            if (i > 0 and (std.ascii.isAlphanumeric(line[i - 1]) or line[i - 1] == '_')) continue;
-            if (i + keyword.len < line.len and (std.ascii.isAlphanumeric(line[i + keyword.len]) or line[i + keyword.len] == '_')) continue;
-            return true;
-        }
+    // Append 'end' for each short-if
+    while (ends_needed > 0) : (ends_needed -= 1) {
+        try result.appendSlice(allocator, " end");
     }
-    return false;
+
+    const slice = try result.toOwnedSlice(allocator);
+    return slice;
 }
 
 const RHSResult = struct { rhs: []const u8, end: usize };
@@ -481,6 +754,11 @@ fn extractRHS(line: []const u8, start: usize) RHSResult {
             continue;
         }
 
+        // Stop at comment start (-- outside strings)
+        if (ch == '-' and i + 1 < line.len and line[i + 1] == '-') {
+            break;
+        }
+
         // Track parens/brackets
         if (ch == '(' or ch == '[') {
             depth += 1;
@@ -498,6 +776,84 @@ fn extractRHS(line: []const u8, start: usize) RHSResult {
             if (isStatementKeyword(line, i)) break;
         }
 
+        // At depth 0, detect statement boundary: value followed by space then identifier.
+        // In Lua, two values can't be adjacent (without an operator between them),
+        // so "expr identifier" at depth 0 means a new statement is starting.
+        if (depth == 0 and (ch == ' ' or ch == '\t') and i > rhs_start) {
+            const prev = line[i - 1];
+            const prev_is_value = std.ascii.isAlphanumeric(prev) or prev == '_' or prev == ')' or prev == ']';
+            if (prev_is_value) {
+                // Skip whitespace to see what follows
+                var peek = i;
+                while (peek < line.len and (line[peek] == ' ' or line[peek] == '\t')) : (peek += 1) {}
+                if (peek < line.len and (std.ascii.isAlphabetic(line[peek]) or line[peek] == '_')) {
+                    // Check it's not an operator keyword: and, or, not
+                    const is_op_kw = isOperatorKeyword(line, peek);
+                    if (!is_op_kw) {
+                        // This is a new statement — stop here
+                        break;
+                    }
+                }
+            }
+        }
+
+        // At depth 0, check for assignment/compound assignment that starts a new statement.
+        // E.g. in "expr1 n.y+=expr2", stop before "n.y".
+        if (depth == 0 and ch == '=' and i > rhs_start) {
+            // Determine what kind of '=' this is
+            const prev = line[i - 1];
+            // Skip comparison operators: ==, ~=, <=, >=, !=
+            if (prev == '=' or prev == '~' or prev == '<' or prev == '>' or prev == '!') {
+                i += 1;
+                continue;
+            }
+            // This is a plain '=' or compound assignment (+=, -=, *=, /=, %=, \=, |=, &=)
+            // Back up past the operator to find the LHS start
+            var lhs_end = i;
+            if (prev == '+' or prev == '-' or prev == '*' or prev == '/' or
+                prev == '%' or prev == '\\' or prev == '|' or prev == '&')
+            {
+                lhs_end = i - 1; // skip the operator char
+            }
+            // Also handle multi-char compound ops: ..=, >>=, <<=, ^^=
+            if (lhs_end >= 2) {
+                const pp = line[lhs_end - 1];
+                if ((prev == '.' and pp == '.') or // ..=
+                    (prev == '>' and pp == '>') or // >>=
+                    (prev == '<' and pp == '<') or // <<=
+                    (prev == '^' and pp == '^')) // ^^=
+                {
+                    lhs_end -= 1; // skip the second operator char too
+                }
+            }
+            // Now back up past whitespace
+            while (lhs_end > rhs_start and (line[lhs_end - 1] == ' ' or line[lhs_end - 1] == '\t')) : (lhs_end -= 1) {}
+            // The LHS should be an identifier-like thing (alpha, digit, _, ., ], [)
+            if (lhs_end > rhs_start) {
+                const lhs_last = line[lhs_end - 1];
+                if (std.ascii.isAlphanumeric(lhs_last) or lhs_last == '_' or lhs_last == ']') {
+                    // Find start of LHS (back up past identifier chars)
+                    var lhs_start = lhs_end;
+                    while (lhs_start > rhs_start) {
+                        const c = line[lhs_start - 1];
+                        if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '[' or c == ']') {
+                            lhs_start -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    // Only stop if the LHS is distinct from the RHS start
+                    // (i.e., there's actual expression content before the LHS)
+                    if (lhs_start > rhs_start) {
+                        // Trim trailing whitespace
+                        var stop = lhs_start;
+                        while (stop > rhs_start and (line[stop - 1] == ' ' or line[stop - 1] == '\t')) : (stop -= 1) {}
+                        return .{ .rhs = line[rhs_start..stop], .end = lhs_start };
+                    }
+                }
+            }
+        }
+
         i += 1;
     }
 
@@ -513,9 +869,27 @@ fn isStatementKeyword(line: []const u8, pos: usize) bool {
         "return", "end", "if", "then", "else", "elseif",
         "do", "while", "for", "repeat", "until", "local", "break", "goto",
     };
-    // Check word boundary before
-    if (pos > 0 and (std.ascii.isAlphanumeric(line[pos - 1]) or line[pos - 1] == '_')) return false;
+    // Check word boundary before — only alpha/underscore counts as part of an identifier.
+    // Digits do NOT prevent keyword recognition: in PICO-8, "1return" is number + keyword.
+    if (pos > 0 and (std.ascii.isAlphabetic(line[pos - 1]) or line[pos - 1] == '_')) return false;
 
+    for (keywords) |kw| {
+        if (pos + kw.len <= line.len and std.mem.eql(u8, line[pos .. pos + kw.len], kw)) {
+            // Check word boundary after
+            if (pos + kw.len < line.len) {
+                const next = line[pos + kw.len];
+                if (std.ascii.isAlphanumeric(next) or next == '_') continue;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Check if the identifier at pos is an operator keyword (and, or, not)
+/// that can appear within an expression.
+fn isOperatorKeyword(line: []const u8, pos: usize) bool {
+    const keywords = [_][]const u8{ "and", "or", "not" };
     for (keywords) |kw| {
         if (pos + kw.len <= line.len and std.mem.eql(u8, line[pos .. pos + kw.len], kw)) {
             // Check word boundary after
@@ -750,6 +1124,16 @@ fn parseBinaryLiteral(s: []const u8) f64 {
         }
     }
     return @as(f64, @floatFromInt(int_part)) + frac_part;
+}
+
+/// Check if a character following '\' is a valid Lua 5.2 escape sequence start.
+/// Valid: \a \b \f \n \r \t \v \\ \" \' \[ \] \z \xNN \0-\9 (decimal digits)
+fn isValidLua52Escape(ch: u8) bool {
+    return switch (ch) {
+        'a', 'b', 'f', 'n', 'r', 't', 'v', '\\', '"', '\'', '[', ']', 'z', 'x' => true,
+        '0'...'9' => true,
+        else => false,
+    };
 }
 
 /// Map P8SCII special glyph bytes to their PICO-8 button ID strings.

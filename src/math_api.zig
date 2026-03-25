@@ -578,6 +578,17 @@ pub fn api_foreach(lua: *zlua.Lua) i32 {
 
 pub fn api_all(lua: *zlua.Lua) i32 {
     _ = getPico(lua);
+    // If argument is not a table, return an iterator that immediately returns nil
+    if (lua.typeOf(1) != .table) {
+        lua.pushClosure(struct {
+            fn f(state: ?*zlua.LuaState) callconv(.c) i32 {
+                const l: *zlua.Lua = @ptrCast(state);
+                l.pushNil();
+                return 1;
+            }
+        }.f, 0);
+        return 1;
+    }
     // Return an iterator function
     lua.pushValue(1); // table (upvalue 1)
     lua.pushNumber(0); // index (upvalue 2)

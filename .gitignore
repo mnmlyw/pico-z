@@ -5,3 +5,5 @@ zig-out/
 dist/
 *.p8
 *.p8.png
+*.sav
+carts/

@@ -385,6 +385,8 @@ fn api_stat(lua: *zlua.Lua) c_int {
         4 => {
             _ = lua.pushString(""); // clipboard
         },
+        5 => _ = lua.pushString("0.2.3"), // PICO-8 version string
+        6 => _ = lua.pushString(""), // parameter string (empty)
         7 => lua.pushNumber(@floatFromInt(pico.target_fps)),
         16...19 => {
             // Current note for SFX channel 0-3
