@@ -172,6 +172,7 @@ pub fn registerAll(lua: *zlua.Lua, pico: *PicoState) void {
         .{ "stop", wrapFn(api_stop) },
         .{ "flip", wrapFn(api_flip) },
         .{ "reset", wrapFn(api_reset) },
+        .{ "serial", wrapFn(api_serial) },
     };
 
     inline for (funcs) |f| {
@@ -733,6 +734,16 @@ fn api_run(lua: *zlua.Lua) c_int {
 fn api_stop(_: *zlua.Lua) c_int {
     // No-op — PICO-8 stop() halts and returns to editor, which we don't have
     return 0;
+}
+
+fn api_serial(lua: *zlua.Lua) c_int {
+    _ = getPico(lua);
+    // serial(channel, address, length)
+    // Mostly used for GPIO/hardware — stub for desktop
+    const channel = optInt(lua, 1, 0);
+    _ = channel;
+    lua.pushNumber(0);
+    return 1;
 }
 
 fn api_flip(lua: *zlua.Lua) c_int {

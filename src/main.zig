@@ -112,6 +112,7 @@ pub fn main() !void {
 
     // Main loop
     var running = true;
+    var frame_overran = false;
 
     while (running) {
         const frame_start = std.time.nanoTimestamp();
@@ -215,7 +216,10 @@ pub fn main() !void {
         memory.ram[0x5F4D] = input.btn_state[1];
         pico.key_states = c.SDL_GetKeyboardState(null);
 
-        // Run cart
+        // Run cart — at 30fps, if previous frame overran, call _update twice
+        if (frame_overran and !lua_engine.use60fps()) {
+            lua_engine.callUpdate();
+        }
         lua_engine.callUpdate();
         lua_engine.callDraw();
 
@@ -309,7 +313,8 @@ pub fn main() !void {
         const frame_time_ns: u64 = 1_000_000_000 / @as(u64, pico.target_fps);
         const frame_end = std.time.nanoTimestamp();
         const elapsed: u64 = @intCast(frame_end - frame_start);
-        if (elapsed < frame_time_ns) {
+        frame_overran = elapsed > frame_time_ns;
+        if (!frame_overran) {
             std.Thread.sleep(frame_time_ns - elapsed);
         }
     }

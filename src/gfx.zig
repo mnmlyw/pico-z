@@ -151,7 +151,7 @@ pub fn api_pget(lua: *zlua.Lua) i32 {
     const x = luaToInt(lua, 1);
     const y = luaToInt(lua, 2);
     if (x < 0 or x >= 128 or y < 0 or y >= 128) {
-        lua.pushNumber(0);
+        lua.pushNumber(@floatFromInt(pico.memory.ram[0x5F5B]));
         return 1;
     }
     const col = pico.memory.screenGet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))));
@@ -627,14 +627,15 @@ pub fn api_map(lua: *zlua.Lua) i32 {
     const cel_h = optInt(lua, 6, 64);
     const layer = optInt(lua, 7, 0);
 
+    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 256 else @as(i32, pico.memory.ram[0x5F57]);
     var cy: i32 = 0;
     while (cy < cel_h) : (cy += 1) {
         var cx: i32 = 0;
         while (cx < cel_w) : (cx += 1) {
             const mx = cel_x + cx;
             const my = cel_y + cy;
-            if (mx < 0 or mx >= 128 or my < 0 or my >= 64) continue;
-            const tile = pico.memory.mapGet(@intCast(@as(u32, @bitCast(mx))), @intCast(@as(u32, @bitCast(my))));
+            if (mx < 0 or mx >= map_w or my < 0 or my >= 64) continue;
+            const tile = mapGetWide(pico.memory, mx, my);
             // Tile 0 is empty by default; draw it only if 0x5F36 bit 3 is set
             if (tile == 0 and (pico.memory.ram[0x5F36] & 0x8) == 0) continue;
             if (layer != 0) {
@@ -653,10 +654,11 @@ pub fn api_mget(lua: *zlua.Lua) i32 {
     const pico = getPico(lua);
     const x = luaToInt(lua, 1);
     const y = luaToInt(lua, 2);
-    if (x < 0 or x >= 128 or y < 0 or y >= 64) {
-        lua.pushNumber(0);
+    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 256 else @as(i32, pico.memory.ram[0x5F57]);
+    if (x < 0 or x >= map_w or y < 0 or y >= 64) {
+        lua.pushNumber(@floatFromInt(pico.memory.ram[0x5F5A]));
     } else {
-        lua.pushNumber(@floatFromInt(pico.memory.mapGet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))))));
+        lua.pushNumber(@floatFromInt(mapGetWide(pico.memory, x, y)));
     }
     return 1;
 }
@@ -666,10 +668,40 @@ pub fn api_mset(lua: *zlua.Lua) i32 {
     const x = luaToInt(lua, 1);
     const y = luaToInt(lua, 2);
     const v = luaToInt(lua, 3);
-    if (x >= 0 and x < 128 and y >= 0 and y < 64) {
-        pico.memory.mapSet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))), @truncate(@as(u32, @bitCast(v))));
+    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 256 else @as(i32, pico.memory.ram[0x5F57]);
+    if (x >= 0 and x < map_w and y >= 0 and y < 64) {
+        mapSetWide(pico.memory, x, y, @truncate(@as(u32, @bitCast(v))));
     }
     return 0;
+}
+
+/// Map access respecting 0x5F57 custom map width (0=256, default 128)
+fn mapGetWide(memory: *Memory, x: i32, y: i32) u8 {
+    const map_w: i32 = if (memory.ram[0x5F57] == 0) 256 else @as(i32, memory.ram[0x5F57]);
+    if (x < 0 or x >= map_w or y < 0 or y >= 64) return 0;
+    // Default layout: rows 0-31 at 0x2000, rows 32-63 at 0x1000 (shared with sprites)
+    if (x < 128) {
+        return memory.mapGet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))));
+    }
+    // Extended map (x >= 128): only accessible if map_w > 128
+    // Uses memory beyond normal map region — compute address directly
+    const addr: u16 = @intCast(@as(u32, @bitCast(y)) * @as(u32, @intCast(map_w)) + @as(u32, @bitCast(x)));
+    const base: u16 = @intCast(memory.ram[0x5F56]);
+    const map_base = @as(u16, base) * 256;
+    return memory.ram[map_base +% addr];
+}
+
+fn mapSetWide(memory: *Memory, x: i32, y: i32, val: u8) void {
+    const map_w: i32 = if (memory.ram[0x5F57] == 0) 256 else @as(i32, memory.ram[0x5F57]);
+    if (x < 0 or x >= map_w or y < 0 or y >= 64) return;
+    if (x < 128) {
+        memory.mapSet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))), val);
+        return;
+    }
+    const addr: u16 = @intCast(@as(u32, @bitCast(y)) * @as(u32, @intCast(map_w)) + @as(u32, @bitCast(x)));
+    const base: u16 = @intCast(memory.ram[0x5F56]);
+    const map_base = @as(u16, base) * 256;
+    memory.ram[map_base +% addr] = val;
 }
 
 pub fn api_sget(lua: *zlua.Lua) i32 {
@@ -677,7 +709,7 @@ pub fn api_sget(lua: *zlua.Lua) i32 {
     const x = luaToInt(lua, 1);
     const y = luaToInt(lua, 2);
     if (x < 0 or x >= 128 or y < 0 or y >= 128) {
-        lua.pushNumber(0);
+        lua.pushNumber(@floatFromInt(pico.memory.ram[0x5F59]));
     } else {
         lua.pushNumber(@floatFromInt(pico.memory.spriteGet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))))));
     }
@@ -784,6 +816,10 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
     var y = start_y - cam.y;
     var color = col;
     var char_w: i32 = 4;
+    var char_h: i32 = 6;
+    var home_x: i32 = x;
+    var home_y: i32 = y;
+    var tab_w: i32 = 16;
     var i: usize = 0;
     while (i < text.len) {
         const ch = text[i];
@@ -828,26 +864,81 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                     i += 2;
                 }
             },
-            0x06 => { // \^ special commands — skip command byte
+            0x06 => { // \^ special commands
                 if (i < text.len) {
-                    // Various sub-commands (decoration, width, etc.)
                     const cmd = text[i];
                     i += 1;
                     switch (cmd) {
-                        'w' => char_w = 8, // wide mode
-                        't' => char_w = 4, // tall/normal mode
-                        'g' => {}, // TODO: custom font
-                        'j', 'k' => {}, // TODO: scroll/wrap modes
+                        'w', '-' + 128 => char_w = if (char_w == 8) 4 else 8, // wide mode toggle (\^w / \^-w)
+                        't' => char_h = if (char_h == 12) 6 else 12, // tall mode toggle
+                        '=' => {}, // stripey mode (cosmetic, skip)
+                        'p' => { // pinball = wide + tall + stripey
+                            char_w = 8;
+                            char_h = 12;
+                        },
+                        'i' => {}, // invert (skip for now)
+                        'b' => {}, // border toggle (skip)
+                        '#' => {}, // solid background toggle (skip)
+                        'c' => { // \^c N — clear screen to color N, reset cursor
+                            if (i < text.len) {
+                                const clear_col: u4 = @truncate(text[i] & 0x0f);
+                                i += 1;
+                                const byte = @as(u8, clear_col) | (@as(u8, clear_col) << 4);
+                                @memset(memory.ram[mem_const.ADDR_SCREEN..mem_const.ADDR_SCREEN_END], byte);
+                                x = start_x - cam.x;
+                                y = start_y - cam.y;
+                            }
+                        },
+                        'd' => { // \^d N — set delay per character (we skip the delay but consume param)
+                            if (i < text.len) i += 1;
+                        },
+                        'g' => { // move cursor to home position
+                            x = home_x;
+                            y = home_y;
+                        },
+                        'h' => { // set current position as home
+                            home_x = x;
+                            home_y = y;
+                        },
+                        'j' => { // \^j X Y — jump cursor by x,y pixels
+                            if (i + 1 < text.len) {
+                                x += @as(i32, @as(i8, @bitCast(text[i])));
+                                y += @as(i32, @as(i8, @bitCast(text[i + 1])));
+                                i += 2;
+                            }
+                        },
+                        'r' => { // \^r N — set right wrap boundary at N*4 pixels
+                            if (i < text.len) i += 1; // consume but don't implement wrapping
+                        },
+                        's' => { // \^s N — set tab stop width
+                            if (i < text.len) {
+                                tab_w = @max(@as(i32, text[i]), 1);
+                                i += 1;
+                            }
+                        },
+                        'x' => { // \^x N — set character width
+                            if (i < text.len) {
+                                char_w = @as(i32, text[i]);
+                                i += 1;
+                            }
+                        },
+                        'y' => { // \^y N — set character height
+                            if (i < text.len) {
+                                char_h = @as(i32, text[i]);
+                                i += 1;
+                            }
+                        },
+                        '1'...'9' => {}, // skip frames (animation delay, ignore)
                         else => {},
                     }
                 }
             },
             0x00 => break, // \0 terminate string
             0x08 => x -= char_w, // \b backspace
-            0x09 => x = (x & ~@as(i32, 15)) + 16, // \t tab
+            0x09 => x = @divTrunc(x, tab_w) * tab_w + tab_w, // \t tab
             0x0a => { // \n newline
                 x = start_x - cam.x;
-                y += 6;
+                y += char_h;
             },
             0x0c => { // \f set foreground color
                 if (i < text.len) {
