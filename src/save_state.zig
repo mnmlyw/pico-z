@@ -283,7 +283,7 @@ const lua_serializer =
     \\memcpy=1,memset=1,reload=1,cstore=1,
     \\sfx=1,music=1,stat=1,time=1,t=1,printh=1,
     \\cartdata=1,dget=1,dset=1,menuitem=1,extcmd=1,
-    \\load=1,run=1,stop=1}
+    \\load=1,run=1,stop=1,flip=1,reset=1}
     \\local _gn={}
     \\for k,v in pairs(_G) do
     \\  if type(k)=="string" and type(v)=="table" and not _sk[k] then

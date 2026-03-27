@@ -112,17 +112,25 @@ pub fn api_atan2(lua: *zlua.Lua) i32 {
 
 pub fn api_max(lua: *zlua.Lua) i32 {
     _ = getPico(lua);
-    const a = luaToNum(lua, 1);
-    const b = luaToNum(lua, 2);
-    lua.pushNumber(@max(a, b));
+    const nargs = lua.getTop();
+    var result = luaToNum(lua, 1);
+    var i: i32 = 2;
+    while (i <= nargs) : (i += 1) {
+        result = @max(result, luaToNum(lua, i));
+    }
+    lua.pushNumber(result);
     return 1;
 }
 
 pub fn api_min(lua: *zlua.Lua) i32 {
     _ = getPico(lua);
-    const a = luaToNum(lua, 1);
-    const b = luaToNum(lua, 2);
-    lua.pushNumber(@min(a, b));
+    const nargs = lua.getTop();
+    var result = luaToNum(lua, 1);
+    var i: i32 = 2;
+    while (i <= nargs) : (i += 1) {
+        result = @min(result, luaToNum(lua, i));
+    }
+    lua.pushNumber(result);
     return 1;
 }
 

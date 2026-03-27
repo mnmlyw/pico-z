@@ -66,6 +66,7 @@ pub fn main() !void {
     };
     defer c.SDL_DestroyTexture(texture);
     _ = c.SDL_SetTextureScaleMode(texture, c.SDL_SCALEMODE_NEAREST);
+    _ = c.SDL_StartTextInput(window);
 
     // Init PICO-8 subsystems
     var memory = Memory.init();
@@ -198,7 +199,15 @@ pub fn main() !void {
             if (event.type == c.SDL_EVENT_MOUSE_WHEEL) {
                 input.mouse_wheel = @intFromFloat(event.wheel.y);
             }
+            if (event.type == c.SDL_EVENT_TEXT_INPUT) {
+                if (event.text.text[0] != 0) {
+                    input.pushKeyChar(event.text.text[0]);
+                }
+            }
         }
+
+        // Reset per-frame input state
+        input.mouse_wheel = 0;
 
         // Update input and sync to PICO-8 memory
         input.update();

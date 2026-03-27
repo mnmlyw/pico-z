@@ -161,6 +161,8 @@ pub fn registerAll(lua: *zlua.Lua, pico: *PicoState) void {
         .{ "load", wrapFn(api_load) },
         .{ "run", wrapFn(api_run) },
         .{ "stop", wrapFn(api_stop) },
+        .{ "flip", wrapFn(api_flip) },
+        .{ "reset", wrapFn(api_reset) },
     };
 
     inline for (funcs) |f| {
@@ -432,6 +434,24 @@ fn api_stat(lua: *zlua.Lua) c_int {
                 lua.pushNumber(@floatFromInt(audio.music_state.tick));
             } else lua.pushNumber(0);
         },
+        30 => {
+            // Keyboard: key event available
+            lua.pushBoolean(pico.input.key_chars_len > 0);
+        },
+        31 => {
+            // Keyboard: next key character
+            if (pico.input.key_chars_len > 0) {
+                _ = lua.pushString(pico.input.key_chars[0..1]);
+                // Shift buffer
+                var i: usize = 0;
+                while (i < pico.input.key_chars_len - 1) : (i += 1) {
+                    pico.input.key_chars[i] = pico.input.key_chars[i + 1];
+                }
+                pico.input.key_chars_len -= 1;
+            } else {
+                _ = lua.pushString("");
+            }
+        },
         32 => {
             if (pico.memory.ram[0x5F2D] & 1 != 0)
                 lua.pushNumber(@floatFromInt(pico.input.mouse_x))
@@ -450,7 +470,7 @@ fn api_stat(lua: *zlua.Lua) c_int {
             else
                 lua.pushNumber(0);
         },
-        35 => {
+        36 => {
             if (pico.memory.ram[0x5F2D] & 1 != 0)
                 lua.pushNumber(@floatFromInt(pico.input.mouse_wheel))
             else
@@ -484,10 +504,56 @@ fn api_stat(lua: *zlua.Lua) c_int {
                 lua.pushNumber(@floatFromInt(audio.music_state.pattern));
             } else lua.pushNumber(-1);
         },
+        55 => {
+            // Total patterns played
+            if (pico.audio) |audio| {
+                lua.pushNumber(@floatFromInt(audio.music_state.total_patterns));
+            } else lua.pushNumber(0);
+        },
         56 => {
             // Same as 26 (newer API alias)
             if (pico.audio) |audio| {
                 lua.pushNumber(@floatFromInt(audio.music_state.tick));
+            } else lua.pushNumber(0);
+        },
+        57 => {
+            // Music playing bool
+            if (pico.audio) |audio| {
+                lua.pushBoolean(audio.music_state.playing);
+            } else lua.pushBoolean(false);
+        },
+        80...85 => {
+            // UTC time: year, month, day, hour, minute, second
+            const ts = std.time.timestamp();
+            const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
+            const day_seconds = epoch.getDaySeconds();
+            const year_day = epoch.getEpochDay().calculateYearDay();
+            const month_day = year_day.calculateMonthDay();
+            switch (n) {
+                80 => lua.pushNumber(@floatFromInt(year_day.year)),
+                81 => lua.pushNumber(@floatFromInt(@intFromEnum(month_day.month))),
+                82 => lua.pushNumber(@floatFromInt(month_day.day_index + 1)),
+                83 => lua.pushNumber(@floatFromInt(day_seconds.getHoursIntoDay())),
+                84 => lua.pushNumber(@floatFromInt(day_seconds.getMinutesIntoHour())),
+                85 => lua.pushNumber(@floatFromInt(day_seconds.getSecondsIntoMinute())),
+                else => lua.pushNumber(0),
+            }
+        },
+        90...95 => {
+            // Local time via C localtime
+            const c_api = @cImport({ @cInclude("time.h"); });
+            var ts = c_api.time(null);
+            const tm = c_api.localtime(&ts);
+            if (tm) |t| {
+                switch (n) {
+                    90 => lua.pushNumber(@floatFromInt(@as(i32, t.*.tm_year) + 1900)),
+                    91 => lua.pushNumber(@floatFromInt(@as(i32, t.*.tm_mon) + 1)),
+                    92 => lua.pushNumber(@floatFromInt(t.*.tm_mday)),
+                    93 => lua.pushNumber(@floatFromInt(t.*.tm_hour)),
+                    94 => lua.pushNumber(@floatFromInt(t.*.tm_min)),
+                    95 => lua.pushNumber(@floatFromInt(t.*.tm_sec)),
+                    else => lua.pushNumber(0),
+                }
             } else lua.pushNumber(0);
         },
         else => lua.pushNumber(0),
@@ -593,7 +659,22 @@ fn api_run(lua: *zlua.Lua) c_int {
 }
 
 fn api_stop(_: *zlua.Lua) c_int {
-    // No-op for now — PICO-8 stop() halts execution and returns to editor
+    // No-op — PICO-8 stop() halts and returns to editor, which we don't have
+    return 0;
+}
+
+fn api_flip(lua: *zlua.Lua) c_int {
+    // flip() is used by carts with manual frame loops (no _update/_draw).
+    // In our architecture, rendering happens in main loop, so this is a yield point.
+    // For coroutine-based game loops, yield to allow frame rendering.
+    _ = getPico(lua);
+    return lua.yield(0);
+}
+
+fn api_reset(lua: *zlua.Lua) c_int {
+    const pico = getPico(lua);
+    // Reset draw state (0x5F00-0x5F3F) to defaults
+    pico.memory.initDrawState();
     return 0;
 }
 

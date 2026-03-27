@@ -55,6 +55,8 @@ const MusicState = struct {
     tick: u32 = 0,
     channel_mask: u8 = 0xF,
     loop_back: i16 = -1, // pattern to loop back to (set by loop start flag)
+    playing: bool = false,
+    total_patterns: u32 = 0,
 };
 
 pub const Audio = struct {
@@ -106,6 +108,7 @@ pub const Audio = struct {
             } else {
                 for (0..NUM_CHANNELS) |i| self.stopChannel(i);
                 self.music_state.pattern = -1;
+                self.music_state.playing = false;
             }
             return;
         }
@@ -155,6 +158,7 @@ pub const Audio = struct {
 
         if (pattern < 0) {
             self.music_state.pattern = -1;
+            self.music_state.playing = false;
             return;
         }
 
@@ -162,6 +166,8 @@ pub const Audio = struct {
             .pattern = @intCast(pattern),
             .tick = 0,
             .channel_mask = if (mask > 0) @intCast(mask) else 0xF,
+            .playing = true,
+            .total_patterns = 0,
         };
 
         // Start SFX for each channel in the pattern
@@ -469,6 +475,7 @@ pub const Audio = struct {
 
         if (stop) {
             self.music_state.pattern = -1;
+            self.music_state.playing = false;
             return;
         }
 
@@ -478,10 +485,12 @@ pub const Audio = struct {
             self.music_state.pattern += 1;
             if (self.music_state.pattern >= 64) {
                 self.music_state.pattern = -1;
+                self.music_state.playing = false;
                 return;
             }
         }
 
+        self.music_state.total_patterns += 1;
         self.startMusicPattern();
     }
 

@@ -14,6 +14,8 @@ pub const Input = struct {
     mouse_y: i32 = 0,
     mouse_buttons: u8 = 0, // bit 0=left, bit 1=right, bit 2=middle
     mouse_wheel: i32 = 0,
+    key_chars: [32]u8 = undefined, // buffered key characters for stat(30)/stat(31)
+    key_chars_len: u8 = 0,
 
     pub fn initControllers(self: *Input) void {
         var num_gamepads: c_int = 0;
@@ -98,11 +100,25 @@ pub const Input = struct {
         return self.btn_state[player] & (@as(u8, 1) << button) != 0;
     }
 
-    pub fn btnp(self: *const Input, button: u3, player: u1) bool {
+    pub fn btnp(self: *const Input, button: u3, player: u1, memory: *const @import("memory.zig").Memory) bool {
         const held = self.held_frames[player][button];
+        if (held == 0) return false;
         if (held == 1) return true; // just pressed
-        if (held >= 15 and (held - 15) % 4 == 0) return true; // repeat
+        // Read repeat config from memory: 0x5F5C=initial delay, 0x5F5D=repeat interval
+        const initial_raw = memory.ram[0x5F5C];
+        const repeat_raw = memory.ram[0x5F5D];
+        const initial: u16 = if (initial_raw == 0) 15 else initial_raw;
+        if (initial == 255) return false; // 255 = never repeat
+        const repeat: u16 = if (repeat_raw == 0) 4 else repeat_raw;
+        if (held >= initial and (held - initial) % repeat == 0) return true;
         return false;
+    }
+
+    pub fn pushKeyChar(self: *Input, ch: u8) void {
+        if (self.key_chars_len < self.key_chars.len) {
+            self.key_chars[self.key_chars_len] = ch;
+            self.key_chars_len += 1;
+        }
     }
 };
 
@@ -110,8 +126,10 @@ pub fn api_btn(lua: *zlua.Lua) c_int {
     const pico = api.getPico(lua);
 
     if (lua.isNoneOrNil(1)) {
-        // Return bitfield for player 0
-        lua.pushNumber(@floatFromInt(pico.input.btn_state[0]));
+        // Return bitfield: P0 in bits 0-5, P1 in bits 8-13
+        const p0: u32 = pico.input.btn_state[0] & 0x3F;
+        const p1: u32 = @as(u32, pico.input.btn_state[1] & 0x3F) << 8;
+        lua.pushNumber(@floatFromInt(p0 | p1));
         return 1;
     }
 
@@ -123,20 +141,23 @@ pub fn api_btn(lua: *zlua.Lua) c_int {
 
 pub fn api_btnp(lua: *zlua.Lua) c_int {
     const pico = api.getPico(lua);
+    const mem = @as(*const @import("memory.zig").Memory, pico.memory);
 
     if (lua.isNoneOrNil(1)) {
-        // Return bitfield of just-pressed for player 0
-        var bits: u8 = 0;
-        for (0..8) |b| {
-            if (pico.input.btnp(@intCast(b), 0)) bits |= @as(u8, 1) << @intCast(b);
+        // Return bitfield: P0 in bits 0-5, P1 in bits 8-13
+        var p0: u32 = 0;
+        var p1: u32 = 0;
+        for (0..6) |b| {
+            if (pico.input.btnp(@intCast(b), 0, mem)) p0 |= @as(u32, 1) << @intCast(b);
+            if (pico.input.btnp(@intCast(b), 1, mem)) p1 |= @as(u32, 1) << @intCast(b);
         }
-        lua.pushNumber(@floatFromInt(bits));
+        lua.pushNumber(@floatFromInt(p0 | (p1 << 8)));
         return 1;
     }
 
     const button: u3 = @intCast(@as(u32, @bitCast(api.luaToInt(lua, 1))) & 7);
     const player: u1 = @intCast(@as(u32, @bitCast(api.optInt(lua, 2, 0))) & 1);
-    lua.pushBoolean(pico.input.btnp(button, player));
+    lua.pushBoolean(pico.input.btnp(button, player, mem));
     return 1;
 }
 

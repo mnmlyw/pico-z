@@ -711,6 +711,7 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                     }
                 }
             },
+            0x00 => break, // \0 terminate string
             0x08 => x -= char_w, // \b backspace
             0x09 => x = (x & ~@as(i32, 15)) + 16, // \t tab
             0x0a => { // \n newline
@@ -884,6 +885,20 @@ pub fn api_palt(lua: *zlua.Lua) i32 {
         return 0;
     }
 
+    // palt(bitfield): single number sets all 16 transparency flags
+    if (lua.isNoneOrNil(2)) {
+        const bits: u16 = @intFromFloat(luaToNum(lua, 1));
+        for (0..16) |i| {
+            if (bits & (@as(u16, 1) << @intCast(i)) != 0) {
+                pico.memory.ram[mem_const.ADDR_DRAW_PAL + i] |= 0x10;
+            } else {
+                pico.memory.ram[mem_const.ADDR_DRAW_PAL + i] &= 0x0F;
+            }
+        }
+        return 0;
+    }
+
+    // palt(col, trans): set single color transparency
     const col: u4 = @truncate(@as(u32, @bitCast(luaToInt(lua, 1))) & 0xF);
     const trans = lua.toBoolean(2);
     if (trans) {
