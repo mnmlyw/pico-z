@@ -57,6 +57,10 @@ const MusicState = struct {
     loop_back: i16 = -1, // pattern to loop back to (set by loop start flag)
     playing: bool = false,
     total_patterns: u32 = 0,
+    // Fade state
+    fade_samples: u32 = 0, // total samples for fade (0 = no fade)
+    fade_progress: u32 = 0, // samples elapsed
+    fade_out: bool = false, // true = fading out (music(-1, fade))
 };
 
 pub const Audio = struct {
@@ -152,13 +156,20 @@ pub const Audio = struct {
         self.readNote(ch);
     }
 
-    pub fn playMusic(self: *Audio, pattern: i32, _: i32, mask: i32) void {
+    pub fn playMusic(self: *Audio, pattern: i32, fade_ms: i32, mask: i32) void {
         self.lockStream();
         defer self.unlockStream();
 
         if (pattern < 0) {
-            self.music_state.pattern = -1;
-            self.music_state.playing = false;
+            if (fade_ms > 0 and self.music_state.playing) {
+                // Fade out current music
+                self.music_state.fade_samples = @intCast(@divTrunc(@as(u64, @intCast(fade_ms)) * SAMPLE_RATE, 1000));
+                self.music_state.fade_progress = 0;
+                self.music_state.fade_out = true;
+            } else {
+                self.music_state.pattern = -1;
+                self.music_state.playing = false;
+            }
             return;
         }
 
@@ -454,6 +465,21 @@ pub const Audio = struct {
                     self.readNote(i);
                 }
             }
+        }
+
+        // Apply music fade
+        if (self.music_state.fade_out and self.music_state.fade_samples > 0) {
+            self.music_state.fade_progress += 1;
+            if (self.music_state.fade_progress >= self.music_state.fade_samples) {
+                // Fade complete — stop music
+                self.music_state.pattern = -1;
+                self.music_state.playing = false;
+                self.music_state.fade_out = false;
+                self.music_state.fade_samples = 0;
+                return 0;
+            }
+            const fade_vol = 1.0 - @as(f32, @floatFromInt(self.music_state.fade_progress)) / @as(f32, @floatFromInt(self.music_state.fade_samples));
+            mix *= fade_vol;
         }
 
         return std.math.clamp(mix, -1.0, 1.0);

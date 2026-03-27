@@ -96,13 +96,24 @@ fn putPixelNoCam(memory: *Memory, sx: i32, sy: i32, col: u4) void {
 }
 
 pub fn renderToARGB(memory: *Memory, pixel_buffer: *[128 * 128]u32) void {
+    const mode = memory.ram[0x5F2C];
     for (0..128) |y| {
         for (0..128) |x| {
-            const col = memory.screenGet(@intCast(x), @intCast(y));
+            // Apply screen mode transformations
+            var sx = x;
+            var sy = y;
+            switch (mode) {
+                1 => sx = x / 2, // horizontal stretch 64→128
+                2 => sy = y / 2, // vertical stretch 64→128
+                3 => { sx = x / 2; sy = y / 2; }, // zoom 64x64→128x128
+                5 => sx = 127 - x, // mirror horizontal
+                6 => sy = 127 - y, // mirror vertical
+                7 => { sx = 127 - x; sy = 127 - y; }, // mirror both
+                else => {},
+            }
+            const col = memory.screenGet(@intCast(sx), @intCast(sy));
             const screen_col = getScreenPal(memory, col);
-            // Map to extended palette if high bit set
-            const pal_idx: usize = screen_col;
-            pixel_buffer[y * 128 + x] = palette.colors[pal_idx];
+            pixel_buffer[y * 128 + x] = palette.colors[screen_col];
         }
     }
 }
@@ -241,6 +252,126 @@ pub fn api_rectfill(lua: *zlua.Lua) i32 {
         }
     }
     return 0;
+}
+
+pub fn api_rrect(lua: *zlua.Lua) i32 {
+    const pico = getPico(lua);
+    var x0 = luaToInt(lua, 1);
+    var y0 = luaToInt(lua, 2);
+    var x1 = luaToInt(lua, 3);
+    var y1 = luaToInt(lua, 4);
+    var r = optInt(lua, 5, 1);
+    const col = getColor(pico.memory, lua, 6);
+    if (x0 > x1) std.mem.swap(i32, &x0, &x1);
+    if (y0 > y1) std.mem.swap(i32, &y0, &y1);
+    const max_r = @min(@divTrunc(x1 - x0, 2), @divTrunc(y1 - y0, 2));
+    r = @min(r, max_r);
+    if (r <= 0) {
+        drawLine(pico.memory, x0, y0, x1, y0, col);
+        drawLine(pico.memory, x1, y0, x1, y1, col);
+        drawLine(pico.memory, x1, y1, x0, y1, col);
+        drawLine(pico.memory, x0, y1, x0, y0, col);
+        return 0;
+    }
+    // Straight edges
+    drawLine(pico.memory, x0 + r, y0, x1 - r, y0, col); // top
+    drawLine(pico.memory, x0 + r, y1, x1 - r, y1, col); // bottom
+    drawLine(pico.memory, x0, y0 + r, x0, y1 - r, col); // left
+    drawLine(pico.memory, x1, y0 + r, x1, y1 - r, col); // right
+    // Corner arcs using Bresenham circle
+    drawCornerArc(pico.memory, x0 + r, y0 + r, r, col, 0); // top-left
+    drawCornerArc(pico.memory, x1 - r, y0 + r, r, col, 1); // top-right
+    drawCornerArc(pico.memory, x1 - r, y1 - r, r, col, 2); // bottom-right
+    drawCornerArc(pico.memory, x0 + r, y1 - r, r, col, 3); // bottom-left
+    return 0;
+}
+
+pub fn api_rrectfill(lua: *zlua.Lua) i32 {
+    const pico = getPico(lua);
+    var x0 = luaToInt(lua, 1);
+    var y0 = luaToInt(lua, 2);
+    var x1 = luaToInt(lua, 3);
+    var y1 = luaToInt(lua, 4);
+    var r = optInt(lua, 5, 1);
+    const col = getColor(pico.memory, lua, 6);
+    if (x0 > x1) std.mem.swap(i32, &x0, &x1);
+    if (y0 > y1) std.mem.swap(i32, &y0, &y1);
+    const max_r = @min(@divTrunc(x1 - x0, 2), @divTrunc(y1 - y0, 2));
+    r = @min(r, max_r);
+    if (r <= 0) {
+        var y = y0;
+        while (y <= y1) : (y += 1) {
+            var x = x0;
+            while (x <= x1) : (x += 1) putPixel(pico.memory, x, y, col);
+        }
+        return 0;
+    }
+    // Fill center rectangle
+    var y = y0 + r;
+    while (y <= y1 - r) : (y += 1) {
+        var x = x0;
+        while (x <= x1) : (x += 1) putPixel(pico.memory, x, y, col);
+    }
+    // Fill top/bottom bands with rounded corners using Bresenham
+    var cx: i32 = 0;
+    var cy: i32 = r;
+    var d: i32 = 3 - 2 * r;
+    while (cx <= cy) {
+        // Top band: rows y0+(r-cy) to y0+(r-1), width narrows
+        fillRrectCornerRow(pico.memory, x0 + r, x1 - r, y0 + r - cy, cx, col);
+        fillRrectCornerRow(pico.memory, x0 + r, x1 - r, y0 + r - cx, cy, col);
+        // Bottom band
+        fillRrectCornerRow(pico.memory, x0 + r, x1 - r, y1 - r + cy, cx, col);
+        fillRrectCornerRow(pico.memory, x0 + r, x1 - r, y1 - r + cx, cy, col);
+        if (d > 0) {
+            cy -= 1;
+            d += 4 * (cx - cy) + 10;
+        } else {
+            d += 4 * cx + 6;
+        }
+        cx += 1;
+    }
+    return 0;
+}
+
+fn fillRrectCornerRow(memory: *Memory, left_cx: i32, right_cx: i32, y: i32, dx: i32, col: u4) void {
+    var x = left_cx - dx;
+    while (x <= right_cx + dx) : (x += 1) {
+        putPixel(memory, x, y, col);
+    }
+}
+
+fn drawCornerArc(memory: *Memory, cx: i32, cy: i32, r: i32, col: u4, quadrant: u2) void {
+    var x: i32 = 0;
+    var y: i32 = r;
+    var d: i32 = 3 - 2 * r;
+    while (x <= y) {
+        switch (quadrant) {
+            0 => { // top-left
+                putPixel(memory, cx - x, cy - y, col);
+                putPixel(memory, cx - y, cy - x, col);
+            },
+            1 => { // top-right
+                putPixel(memory, cx + x, cy - y, col);
+                putPixel(memory, cx + y, cy - x, col);
+            },
+            2 => { // bottom-right
+                putPixel(memory, cx + x, cy + y, col);
+                putPixel(memory, cx + y, cy + x, col);
+            },
+            3 => { // bottom-left
+                putPixel(memory, cx - x, cy + y, col);
+                putPixel(memory, cx - y, cy + x, col);
+            },
+        }
+        if (d > 0) {
+            y -= 1;
+            d += 4 * (x - y) + 10;
+        } else {
+            d += 4 * x + 6;
+        }
+        x += 1;
+    }
 }
 
 pub fn api_circ(lua: *zlua.Lua) i32 {

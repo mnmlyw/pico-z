@@ -37,6 +37,13 @@ pub const PicoState = struct {
 
     // Cart directory for relative load() paths
     cart_dir: ?[]const u8 = null,
+
+    // Parameter string from load()/run() — accessible via stat(6)
+    param_str: [256]u8 = undefined,
+    param_str_len: u8 = 0,
+
+    // Keyboard scancode state for stat(28)
+    key_states: ?[*c]const bool = null,
 };
 
 pub fn getPico(lua: *zlua.Lua) *PicoState {
@@ -65,6 +72,8 @@ pub fn registerAll(lua: *zlua.Lua, pico: *PicoState) void {
         .{ "line", wrapFn(gfx.api_line) },
         .{ "rect", wrapFn(gfx.api_rect) },
         .{ "rectfill", wrapFn(gfx.api_rectfill) },
+        .{ "rrect", wrapFn(gfx.api_rrect) },
+        .{ "rrectfill", wrapFn(gfx.api_rrectfill) },
         .{ "circ", wrapFn(gfx.api_circ) },
         .{ "circfill", wrapFn(gfx.api_circfill) },
         .{ "oval", wrapFn(gfx.api_oval) },
@@ -372,7 +381,20 @@ fn api_reload(lua: *zlua.Lua) c_int {
     const dst = luaToU16Opt(lua, 1, 0);
     const src = luaToU16Opt(lua, 2, 0);
     const len = luaToU16Opt(lua, 3, 0x4300);
-    pico.memory.reload(dst, src, len);
+
+    // reload(dst, src, len, filename) — load from another cart file
+    if (lua.toString(4)) |filename| {
+        if (loadExternalCartRom(pico, filename)) |ext_rom| {
+            defer pico.allocator.free(ext_rom);
+            for (0..len) |i| {
+                const s = src +% @as(u16, @intCast(i));
+                const d = dst +% @as(u16, @intCast(i));
+                pico.memory.ram[d] = if (s < ext_rom.len) ext_rom[s] else 0;
+            }
+        } else |_| {}
+    } else |_| {
+        pico.memory.reload(dst, src, len);
+    }
     return 0;
 }
 
@@ -381,11 +403,38 @@ fn api_cstore(lua: *zlua.Lua) c_int {
     const dst = luaToU16Opt(lua, 1, 0);
     const src = luaToU16Opt(lua, 2, 0);
     const len = luaToU16Opt(lua, 3, 0x4300);
-    // Copy from RAM to ROM (opposite of reload)
-    for (0..len) |i| {
-        pico.memory.rom[dst +% @as(u16, @intCast(i))] = pico.memory.ram[src +% @as(u16, @intCast(i))];
+
+    if (lua.toString(4)) |_| {
+        // cstore to external file — not supported (would need to write cart files)
+    } else |_| {
+        // Copy from RAM to ROM (opposite of reload)
+        for (0..len) |i| {
+            pico.memory.rom[dst +% @as(u16, @intCast(i))] = pico.memory.ram[src +% @as(u16, @intCast(i))];
+        }
     }
     return 0;
+}
+
+fn loadExternalCartRom(pico: *PicoState, filename: []const u8) ![]u8 {
+    const cart_mod = @import("cart.zig");
+    // Resolve relative to current cart directory
+    const path = if (pico.cart_dir) |dir|
+        try std.fs.path.join(pico.allocator, &.{ dir, filename })
+    else
+        try pico.allocator.dupe(u8, filename);
+    defer pico.allocator.free(path);
+
+    var temp_mem = Memory.init();
+    var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
+        try cart_mod.loadP8PngFile(pico.allocator, path, &temp_mem)
+    else
+        try cart_mod.loadP8File(pico.allocator, path, &temp_mem);
+    defer cart.deinit();
+
+    // Return copy of the loaded ROM data (first 0x4300 bytes)
+    const rom = try pico.allocator.alloc(u8, 0x4300);
+    @memcpy(rom, temp_mem.ram[0..0x4300]);
+    return rom;
 }
 
 fn api_stat(lua: *zlua.Lua) c_int {
@@ -398,7 +447,12 @@ fn api_stat(lua: *zlua.Lua) c_int {
             _ = lua.pushString(""); // clipboard
         },
         5 => _ = lua.pushString("0.2.3"), // PICO-8 version string
-        6 => _ = lua.pushString(""), // parameter string (empty)
+        6 => {
+            if (pico.param_str_len > 0)
+                _ = lua.pushString(pico.param_str[0..pico.param_str_len])
+            else
+                _ = lua.pushString("");
+        },
         7 => lua.pushNumber(@floatFromInt(pico.target_fps)),
         16...19 => {
             // Current note for SFX channel 0-3
@@ -433,6 +487,16 @@ fn api_stat(lua: *zlua.Lua) c_int {
             if (pico.audio) |audio| {
                 lua.pushNumber(@floatFromInt(audio.music_state.tick));
             } else lua.pushNumber(0);
+        },
+        28 => {
+            // Keyboard scancode check: stat(28, scancode)
+            const scancode = optInt(lua, 2, -1);
+            if (scancode >= 0 and pico.key_states != null) {
+                const states = pico.key_states.?;
+                lua.pushBoolean(states[@intCast(scancode)]);
+            } else {
+                lua.pushBoolean(false);
+            }
         },
         30 => {
             // Keyboard: key event available
@@ -644,6 +708,14 @@ fn api_load(lua: *zlua.Lua) c_int {
     @memcpy(buf[0..name.len], name);
     pico.pending_load = buf;
     pico.pending_load_len = @intCast(name.len);
+    // Store param_str (arg 3) for stat(6) — arg 2 is breadcrumb (ignored)
+    if (lua.toString(3)) |ps| {
+        const plen = @min(ps.len, pico.param_str.len);
+        @memcpy(pico.param_str[0..plen], ps[0..plen]);
+        pico.param_str_len = @intCast(plen);
+    } else |_| {
+        pico.param_str_len = 0;
+    }
     // Raise error to abort current Lua execution; main loop handles the load
     _ = lua.raiseErrorStr("cart_load", .{});
     return 0;

@@ -213,6 +213,7 @@ pub fn main() !void {
         input.update();
         memory.ram[0x5F4C] = input.btn_state[0];
         memory.ram[0x5F4D] = input.btn_state[1];
+        pico.key_states = c.SDL_GetKeyboardState(null);
 
         // Run cart
         lua_engine.callUpdate();
