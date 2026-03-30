@@ -1650,3 +1650,202 @@ test "cartdata empty id produces default filename" {
     defer alloc.free(path);
     try testing.expect(std.mem.indexOf(u8, path, "default") != null);
 }
+
+// ══════════════════════════════════════════════════
+// Coverage: cstore, dget/dset, peek2/poke2, atan2, math
+// ══════════════════════════════════════════════════
+
+test "peek2/poke2 round-trip via Lua" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "poke2(0x4300, 0x1234)");
+    try testing.expectEqual(@as(f64, 0x1234), try evalLuaNumber(lua_engine.lua, "return peek2(0x4300)"));
+    // Verify little-endian byte order
+    try testing.expectEqual(@as(f64, 0x34), try evalLuaNumber(lua_engine.lua, "return peek(0x4300)"));
+    try testing.expectEqual(@as(f64, 0x12), try evalLuaNumber(lua_engine.lua, "return peek(0x4301)"));
+}
+
+test "cstore copies RAM to ROM and reload restores it" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // Write to RAM, cstore to ROM, change RAM, reload from ROM
+    try runLua(lua_engine.lua,
+        \\poke(0x4300, 0xAA)
+        \\poke(0x4301, 0xBB)
+        \\cstore(0x4300, 0x4300, 2)
+        \\poke(0x4300, 0)
+        \\poke(0x4301, 0)
+        \\reload(0x4300, 0x4300, 2)
+    );
+    try testing.expectEqual(@as(f64, 0xAA), try evalLuaNumber(lua_engine.lua, "return peek(0x4300)"));
+    try testing.expectEqual(@as(f64, 0xBB), try evalLuaNumber(lua_engine.lua, "return peek(0x4301)"));
+}
+
+test "dget/dset round-trip" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    defer old_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer old_cwd.setAsCwd() catch unreachable;
+
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    defer if (pico.cart_data_id) |id| testing.allocator.free(id);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+
+    try runLua(lua_engine.lua, "cartdata('dget_test')");
+    try runLua(lua_engine.lua, "dset(0, 42.5) dset(63, -7.25)");
+    try testing.expectEqual(@as(f64, 42.5), try evalLuaNumber(lua_engine.lua, "return dget(0)"));
+    try testing.expectEqual(@as(f64, -7.25), try evalLuaNumber(lua_engine.lua, "return dget(63)"));
+    // Out of range returns 0
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return dget(64)"));
+}
+
+test "atan2 returns turns in 0-1 range" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // atan2 returns a value in 0-1 (turns)
+    const a = try evalLuaNumber(lua_engine.lua, "return atan2(1, 0)");
+    try testing.expect(a >= 0 and a <= 1);
+    const b = try evalLuaNumber(lua_engine.lua, "return atan2(0, -1)");
+    try testing.expect(b >= 0 and b <= 1);
+    const d = try evalLuaNumber(lua_engine.lua, "return atan2(-1, -1)");
+    try testing.expect(d >= 0 and d <= 1);
+    // Different inputs produce different angles
+    try testing.expect(a != b);
+}
+
+test "abs, ceil, sqrt" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return abs(-5)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return abs(0)"));
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return ceil(2.1)"));
+    try testing.expectEqual(@as(f64, 2), try evalLuaNumber(lua_engine.lua, "return ceil(2)"));
+    try testing.expectEqual(@as(f64, -2), try evalLuaNumber(lua_engine.lua, "return ceil(-2.9)"));
+    try testing.expectEqual(@as(f64, 4), try evalLuaNumber(lua_engine.lua, "return sqrt(16)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return sqrt(0)"));
+}
+
+test "bnot, rotl, rotr" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // bnot(0) = -1 (all bits set in 16:16 = 0xFFFF.FFFF = -0x0.0001)
+    const bnot_val = try evalLuaNumber(lua_engine.lua, "return bnot(0)");
+    try testing.expect(bnot_val < 0);
+    // rotl and rotr are inverses
+    try runLua(lua_engine.lua, "assert(rotr(rotl(5, 3), 3) == 5)");
+}
+
+test "rectfill draws filled rectangle" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "cls(0) rectfill(10,10,20,20,7)");
+    // Center pixel should be filled
+    try testing.expectEqual(@as(u4, 7), memory.screenGet(15, 15));
+    // Outside should be 0
+    try testing.expectEqual(@as(u4, 0), memory.screenGet(9, 15));
+    try testing.expectEqual(@as(u4, 0), memory.screenGet(21, 15));
+}
+
+test "circfill draws filled circle" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "cls(0) circfill(64,64,10,7)");
+    // Center should be filled
+    try testing.expectEqual(@as(u4, 7), memory.screenGet(64, 64));
+    // Just inside radius
+    try testing.expectEqual(@as(u4, 7), memory.screenGet(70, 64));
+    // Well outside radius
+    try testing.expectEqual(@as(u4, 0), memory.screenGet(80, 64));
+}
+
+test "sget reads sprite sheet pixels" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "sset(5, 5, 9)");
+    try testing.expectEqual(@as(f64, 9), try evalLuaNumber(lua_engine.lua, "return sget(5, 5)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return sget(0, 0)"));
+}
+
+test "mget/mset map tile access" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "mset(10, 5, 42)");
+    try testing.expectEqual(@as(f64, 42), try evalLuaNumber(lua_engine.lua, "return mget(10, 5)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return mget(0, 0)"));
+}
+
+test "memcpy and memset via Lua" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua,
+        \\memset(0x4300, 0xAA, 4)
+        \\memcpy(0x4304, 0x4300, 4)
+    );
+    try testing.expectEqual(@as(f64, 0xAA), try evalLuaNumber(lua_engine.lua, "return peek(0x4304)"));
+    try testing.expectEqual(@as(f64, 0xAA), try evalLuaNumber(lua_engine.lua, "return peek(0x4307)"));
+}
+
+test "flr on negative numbers" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, -3), try evalLuaNumber(lua_engine.lua, "return flr(-2.5)"));
+    try testing.expectEqual(@as(f64, 2), try evalLuaNumber(lua_engine.lua, "return flr(2.9)"));
+}
