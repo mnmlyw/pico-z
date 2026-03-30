@@ -504,8 +504,9 @@ pub fn api_ovalfill(lua: *zlua.Lua) i32 {
 fn drawOval(memory: *Memory, x0: i32, y0: i32, x1: i32, y1: i32, col: u4, fill: bool) void {
     const cx_2 = x0 + x1; // doubled center
     const cy_2 = y0 + y1;
-    const rx = if (x1 > x0) x1 - x0 else x0 - x1;
-    const ry = if (y1 > y0) y1 - y0 else y0 - y1;
+    // Semi-axes: half the bounding box dimensions
+    const rx = @divTrunc(if (x1 > x0) x1 - x0 else x0 - x1, 2);
+    const ry = @divTrunc(if (y1 > y0) y1 - y0 else y0 - y1, 2);
     if (rx == 0 and ry == 0) {
         putPixel(memory, x0, y0, col);
         return;
@@ -559,8 +560,8 @@ pub fn api_spr(lua: *zlua.Lua) i32 {
     const flip_x = if (lua.isNoneOrNil(6)) false else lua.toBoolean(6);
     const flip_y = if (lua.isNoneOrNil(7)) false else lua.toBoolean(7);
 
-    const pw: i32 = @intFromFloat(w * 8);
-    const ph: i32 = @intFromFloat(h * 8);
+    const pw: i32 = api_mod.safeFloatToI32(w * 8);
+    const ph: i32 = api_mod.safeFloatToI32(h * 8);
     const sx = @mod(n, 16) * 8;
     const sy = @divTrunc(n, 16) * 8;
 
@@ -627,7 +628,7 @@ pub fn api_map(lua: *zlua.Lua) i32 {
     const cel_h = optInt(lua, 6, 64);
     const layer = optInt(lua, 7, 0);
 
-    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 256 else @as(i32, pico.memory.ram[0x5F57]);
+    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 128 else @as(i32, pico.memory.ram[0x5F57]);
     var cy: i32 = 0;
     while (cy < cel_h) : (cy += 1) {
         var cx: i32 = 0;
@@ -654,7 +655,7 @@ pub fn api_mget(lua: *zlua.Lua) i32 {
     const pico = getPico(lua);
     const x = luaToInt(lua, 1);
     const y = luaToInt(lua, 2);
-    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 256 else @as(i32, pico.memory.ram[0x5F57]);
+    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 128 else @as(i32, pico.memory.ram[0x5F57]);
     if (x < 0 or x >= map_w or y < 0 or y >= 64) {
         lua.pushNumber(@floatFromInt(pico.memory.ram[0x5F5A]));
     } else {
@@ -668,16 +669,16 @@ pub fn api_mset(lua: *zlua.Lua) i32 {
     const x = luaToInt(lua, 1);
     const y = luaToInt(lua, 2);
     const v = luaToInt(lua, 3);
-    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 256 else @as(i32, pico.memory.ram[0x5F57]);
+    const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 128 else @as(i32, pico.memory.ram[0x5F57]);
     if (x >= 0 and x < map_w and y >= 0 and y < 64) {
         mapSetWide(pico.memory, x, y, @truncate(@as(u32, @bitCast(v))));
     }
     return 0;
 }
 
-/// Map access respecting 0x5F57 custom map width (0=256, default 128)
+/// Map access respecting 0x5F57 custom map width (0=128 default)
 fn mapGetWide(memory: *Memory, x: i32, y: i32) u8 {
-    const map_w: i32 = if (memory.ram[0x5F57] == 0) 256 else @as(i32, memory.ram[0x5F57]);
+    const map_w: i32 = if (memory.ram[0x5F57] == 0) 128 else @as(i32, memory.ram[0x5F57]);
     if (x < 0 or x >= map_w or y < 0 or y >= 64) return 0;
     // Default layout: rows 0-31 at 0x2000, rows 32-63 at 0x1000 (shared with sprites)
     if (x < 128) {
@@ -692,7 +693,7 @@ fn mapGetWide(memory: *Memory, x: i32, y: i32) u8 {
 }
 
 fn mapSetWide(memory: *Memory, x: i32, y: i32, val: u8) void {
-    const map_w: i32 = if (memory.ram[0x5F57] == 0) 256 else @as(i32, memory.ram[0x5F57]);
+    const map_w: i32 = if (memory.ram[0x5F57] == 0) 128 else @as(i32, memory.ram[0x5F57]);
     if (x < 0 or x >= map_w or y < 0 or y >= 64) return;
     if (x < 128) {
         memory.mapSet(@intCast(@as(u32, @bitCast(x))), @intCast(@as(u32, @bitCast(y))), val);
@@ -810,6 +811,17 @@ fn printText(pico: *api_mod.PicoState, lua: *zlua.Lua, text: []const u8) i32 {
     return 1;
 }
 
+fn parseHexColor(c: u8) u4 {
+    return @truncate(if (c >= '0' and c <= '9')
+        c - '0'
+    else if (c >= 'a' and c <= 'f')
+        c - 'a' + 10
+    else if (c >= 'A' and c <= 'F')
+        c - 'A' + 10
+    else
+        c & 0x0f);
+}
+
 fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: u4) i32 {
     const cam = getCamera(memory);
     var x = start_x - cam.x;
@@ -881,7 +893,7 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                         '#' => {}, // solid background toggle (skip)
                         'c' => { // \^c N — clear screen to color N, reset cursor
                             if (i < text.len) {
-                                const clear_col: u4 = @truncate(text[i] & 0x0f);
+                                const clear_col: u4 = parseHexColor(text[i]);
                                 i += 1;
                                 const byte = @as(u8, clear_col) | (@as(u8, clear_col) << 4);
                                 @memset(memory.ram[mem_const.ADDR_SCREEN..mem_const.ADDR_SCREEN_END], byte);
@@ -940,9 +952,9 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                 x = start_x - cam.x;
                 y += char_h;
             },
-            0x0c => { // \f set foreground color
+            0x0c => { // \f set foreground color (next byte is hex char '0'-'f')
                 if (i < text.len) {
-                    color = @truncate(text[i] & 0x0f);
+                    color = parseHexColor(text[i]);
                     i += 1;
                 }
             },
@@ -1109,7 +1121,7 @@ pub fn api_palt(lua: *zlua.Lua) i32 {
 
     // palt(bitfield): single number sets all 16 transparency flags
     if (lua.isNoneOrNil(2)) {
-        const bits: u16 = @intFromFloat(luaToNum(lua, 1));
+        const bits: u16 = @truncate(@as(u32, @bitCast(luaToInt(lua, 1))));
         for (0..16) |i| {
             if (bits & (@as(u16, 1) << @intCast(i)) != 0) {
                 pico.memory.ram[mem_const.ADDR_DRAW_PAL + i] |= 0x10;
@@ -1186,8 +1198,9 @@ pub fn api_tline(lua: *zlua.Lua) i32 {
         const sub_x: u3 = @intCast(@as(u32, @intFromFloat(@floor(@mod(wrapped_mx, 1.0) * 8.0))) & 7);
         const sub_y: u3 = @intCast(@as(u32, @intFromFloat(@floor(@mod(wrapped_my, 1.0) * 8.0))) & 7);
 
-        if (tile_x >= 0 and tile_x < 128 and tile_y >= 0 and tile_y < 64) {
-            const tile = pico.memory.mapGet(@intCast(@as(u32, @bitCast(tile_x))), @intCast(@as(u32, @bitCast(tile_y))));
+        const map_w: i32 = if (pico.memory.ram[0x5F57] == 0) 128 else @as(i32, pico.memory.ram[0x5F57]);
+        if (tile_x >= 0 and tile_x < map_w and tile_y >= 0 and tile_y < 64) {
+            const tile = mapGetWide(pico.memory, tile_x, tile_y);
             const should_draw = if (tile == 0) draw_tile0 else true;
 
             if (should_draw) {
@@ -1227,7 +1240,7 @@ pub fn api_tline(lua: *zlua.Lua) i32 {
 pub fn api_fillp(lua: *zlua.Lua) i32 {
     const pico = getPico(lua);
     const p = optNum(lua, 1, 0);
-    const int_val: u32 = @bitCast(@as(i32, @intFromFloat(p)));
+    const int_val: u32 = @bitCast(api_mod.safeFloatToI32(p));
     const pat: u16 = @truncate(int_val);
     pico.memory.poke16(mem_const.ADDR_FILL_PAT, pat);
     // Bit 16 (0b.1) set = use transparency for pattern holes; unset = use secondary color

@@ -9,16 +9,16 @@ const LuaEngine = @import("lua_engine.zig").LuaEngine;
 const fs_atomic = @import("fs_atomic.zig");
 
 const MAGIC = [4]u8{ 'P', 'Z', 'S', 'V' };
-const VERSION: u8 = 2;
+const VERSION: u8 = 6;
 
 /// Byte buffer backed by unmanaged ArrayList
-const ByteBuf = std.ArrayList(u8);
+pub const ByteBuf = std.ArrayList(u8);
 
-fn bufAppend(buf: *ByteBuf, alloc: std.mem.Allocator, data: []const u8) !void {
+pub fn bufAppend(buf: *ByteBuf, alloc: std.mem.Allocator, data: []const u8) !void {
     try buf.appendSlice(alloc, data);
 }
 
-fn bufAppendByte(buf: *ByteBuf, alloc: std.mem.Allocator, byte: u8) !void {
+pub fn bufAppendByte(buf: *ByteBuf, alloc: std.mem.Allocator, byte: u8) !void {
     try buf.append(alloc, byte);
 }
 
@@ -30,7 +30,7 @@ fn bufAppendZeros(buf: *ByteBuf, alloc: std.mem.Allocator, count: usize) !void {
 }
 
 /// Read cursor over a byte slice
-const ReadCursor = struct {
+pub const ReadCursor = struct {
     data: []const u8,
     pos: usize = 0,
 
@@ -65,8 +65,9 @@ pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     try bufAppend(&buf, alloc, &MAGIC);
     try bufAppendByte(&buf, alloc, VERSION);
 
-    // 1. RAM
+    // 1. RAM + ROM
     try bufAppend(&buf, alloc, &pico.memory.ram);
+    try bufAppend(&buf, alloc, &pico.memory.rom);
 
     // 2. Audio state
     if (pico.audio) |audio| {
@@ -82,10 +83,11 @@ pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
 
     // 4. Pico fields
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.frame_count));
-    try bufAppend(&buf, alloc, std.mem.asBytes(&pico.start_time));
+    try bufAppend(&buf, alloc, std.mem.asBytes(&pico.elapsed_time));
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.line_x));
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.line_y));
     try bufAppendByte(&buf, alloc, if (pico.line_valid) 1 else 0);
+    try bufAppend(&buf, alloc, std.mem.asBytes(&pico.rng_state));
 
     // 5. Lua globals (as Lua script)
     try serializeLuaGlobals(&buf, alloc, lua_engine.lua);
@@ -116,46 +118,134 @@ pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     try cursor.readNoEof(&magic);
     if (!std.mem.eql(u8, &magic, &MAGIC)) return error.InvalidSaveState;
     const version = try cursor.readByte();
-    if (version != 2) return error.UnsupportedVersion;
+    if (version != VERSION) return error.UnsupportedVersion;
 
-    // 1. RAM
-    try cursor.readNoEof(&pico.memory.ram);
+    // Stage the host/runtime state first so failed Lua restore doesn't
+    // leave the process in a hybrid partially-restored state.
+    var staged_ram: [mem_const.RAM_SIZE]u8 = undefined;
+    try cursor.readNoEof(&staged_ram);
+    var staged_rom: [mem_const.RAM_SIZE]u8 = undefined;
+    try cursor.readNoEof(&staged_rom);
 
-    // 2. Audio state
-    if (pico.audio) |audio| {
-        audio.lockStream();
-        defer audio.unlockStream();
-        try readAudioState(&cursor, audio);
+    var staged_audio: ?audio_mod.Audio = null;
+    if (pico.audio != null) {
+        var audio = audio_mod.Audio.init(pico.memory);
+        try readAudioState(&cursor, &audio);
+        staged_audio = audio;
     } else {
         try cursor.skip(audioStateSize());
     }
 
-    // 3. Input state
-    try readInputState(&cursor, pico.input);
+    var staged_input = pico.input.*;
+    try readInputState(&cursor, &staged_input);
 
-    // 4. Pico fields
-    try cursor.readNoEof(std.mem.asBytes(&pico.frame_count));
-    try cursor.readNoEof(std.mem.asBytes(&pico.start_time));
-    try cursor.readNoEof(std.mem.asBytes(&pico.line_x));
-    try cursor.readNoEof(std.mem.asBytes(&pico.line_y));
-    pico.line_valid = (try cursor.readByte()) != 0;
+    var staged_frame_count: u32 = undefined;
+    var staged_elapsed_time: f64 = undefined;
+    var staged_line_x: i32 = undefined;
+    var staged_line_y: i32 = undefined;
+    var staged_rng_state: u32 = undefined;
+    try cursor.readNoEof(std.mem.asBytes(&staged_frame_count));
+    try cursor.readNoEof(std.mem.asBytes(&staged_elapsed_time));
+    try cursor.readNoEof(std.mem.asBytes(&staged_line_x));
+    try cursor.readNoEof(std.mem.asBytes(&staged_line_y));
+    const staged_line_valid = (try cursor.readByte()) != 0;
+    try cursor.readNoEof(std.mem.asBytes(&staged_rng_state));
 
-    // 5. Reinit Lua VM then restore globals via Lua script
-    try lua_engine.reinit();
-    deserializeLuaGlobals(&cursor, lua_engine.lua);
+    const saved_ram = pico.memory.ram;
+    const saved_rom = pico.memory.rom;
+    const saved_input = pico.input.*;
+    const saved_frame_count = pico.frame_count;
+    const saved_elapsed_time = pico.elapsed_time;
+    const saved_line_x = pico.line_x;
+    const saved_line_y = pico.line_y;
+    const saved_line_valid = pico.line_valid;
+    const saved_rng_state = pico.rng_state;
+    const saved_audio_ptr = pico.audio;
+    var saved_audio: ?audio_mod.Audio = null;
+    if (saved_audio_ptr) |audio| {
+        audio.lockStream();
+        saved_audio = audio.*;
+        clearAudioStream(audio);
+        if (staged_audio) |*staged| {
+            applyAudioRuntime(audio, staged);
+        }
+    }
+    defer if (saved_audio_ptr) |audio| {
+        audio.unlockStream();
+    };
 
+    var restore_host = true;
+    defer if (restore_host) {
+        pico.memory.ram = saved_ram;
+        pico.memory.rom = saved_rom;
+        pico.input.* = saved_input;
+        pico.frame_count = saved_frame_count;
+        pico.elapsed_time = saved_elapsed_time;
+        pico.line_x = saved_line_x;
+        pico.line_y = saved_line_y;
+        pico.line_valid = saved_line_valid;
+        pico.rng_state = saved_rng_state;
+        pico.audio = saved_audio_ptr;
+        if (saved_audio_ptr) |audio| {
+            clearAudioStream(audio);
+            if (saved_audio) |saved| {
+                audio.* = saved;
+            }
+        }
+    };
+
+    pico.memory.ram = staged_ram;
+    pico.memory.rom = staged_rom;
+    pico.input.* = staged_input;
+    pico.frame_count = staged_frame_count;
+    pico.elapsed_time = staged_elapsed_time;
+    pico.line_x = staged_line_x;
+    pico.line_y = staged_line_y;
+    pico.line_valid = staged_line_valid;
+    pico.rng_state = staged_rng_state;
+    pico.audio = null;
+
+    var staged_engine = try LuaEngine.init(alloc, pico);
+    errdefer staged_engine.deinit();
+    if (lua_engine.processed_source) |source| {
+        staged_engine.processed_source = try alloc.dupe(u8, source);
+    }
+    try staged_engine.reinit();
+    try deserializeLuaGlobals(&cursor, staged_engine.lua);
+
+    pico.audio = saved_audio_ptr;
+    if (saved_audio_ptr) |audio| {
+        clearAudioStream(audio);
+        if (staged_audio) |*staged| {
+            applyAudioRuntime(audio, staged);
+        }
+    }
+
+    lua_engine.deinit();
+    lua_engine.* = staged_engine;
+    restore_host = false;
     std.log.info("save state loaded from {s}", .{save_path});
+}
+
+fn applyAudioRuntime(dst: *audio_mod.Audio, src: *const audio_mod.Audio) void {
+    dst.channels = src.channels;
+    dst.music_state = src.music_state;
+    dst.noise_seed = src.noise_seed;
+}
+
+fn clearAudioStream(audio: *audio_mod.Audio) void {
+    if (audio.stream) |stream| _ = audio_mod.sdl.SDL_ClearAudioStream(stream);
 }
 
 // --- Audio serialization ---
 
-fn audioStateSize() usize {
-    // Per channel: i8+u8+f32+f64+f32+f32+f64+f64+f64+u8+u8+u8+f32+u8+f32+f32+u8+u8+f32+f64+u8+u8 = 78
-    // Music: i16+u32+u8+i16 = 9, noise_seed: u32 = 4
-    return 4 * 78 + 9 + 4;
+pub fn audioStateSize() usize {
+    // Per channel: i8+u8+f32+f64+f32+f32+f64+f64+f64+u8+u8+u8+f32+u8+f32+f32+u8+u8+f32+f64+u8+u8+u8 = 79
+    // Music: i16(2)+u32(4)+u8(1)+i16(2)+u8(1)+u32(4)+u32(4)+u8(1)+u32(4) = 23, noise_seed: u32 = 4
+    return 4 * 79 + 23 + 4;
 }
 
-fn writeAudioState(buf: *ByteBuf, alloc: std.mem.Allocator, a: *audio_mod.Audio) !void {
+pub fn writeAudioState(buf: *ByteBuf, alloc: std.mem.Allocator, a: *audio_mod.Audio) !void {
     for (0..4) |i| {
         const ch = &a.channels[i];
         try bufAppend(buf, alloc, std.mem.asBytes(&ch.sfx_id));
@@ -180,15 +270,21 @@ fn writeAudioState(buf: *ByteBuf, alloc: std.mem.Allocator, a: *audio_mod.Audio)
         try bufAppend(buf, alloc, std.mem.asBytes(&ch.inst_phase));
         try bufAppendByte(buf, alloc, ch.prev_pitch);
         try bufAppendByte(buf, alloc, ch.prev_vol);
+        try bufAppendByte(buf, alloc, if (ch.loop_released) 1 else 0);
     }
     try bufAppend(buf, alloc, std.mem.asBytes(&a.music_state.pattern));
     try bufAppend(buf, alloc, std.mem.asBytes(&a.music_state.tick));
     try bufAppendByte(buf, alloc, a.music_state.channel_mask);
     try bufAppend(buf, alloc, std.mem.asBytes(&a.music_state.loop_back));
+    try bufAppendByte(buf, alloc, if (a.music_state.playing) 1 else 0);
+    try bufAppend(buf, alloc, std.mem.asBytes(&a.music_state.total_patterns));
+    try bufAppend(buf, alloc, std.mem.asBytes(&a.music_state.fade_samples));
+    try bufAppendByte(buf, alloc, if (a.music_state.fade_out) 1 else 0);
+    try bufAppend(buf, alloc, std.mem.asBytes(&a.music_state.fade_progress));
     try bufAppend(buf, alloc, std.mem.asBytes(&a.noise_seed));
 }
 
-fn readAudioState(cursor: *ReadCursor, a: *audio_mod.Audio) !void {
+pub fn readAudioState(cursor: *ReadCursor, a: *audio_mod.Audio) !void {
     for (0..4) |i| {
         var ch = &a.channels[i];
         try cursor.readNoEof(std.mem.asBytes(&ch.sfx_id));
@@ -213,11 +309,17 @@ fn readAudioState(cursor: *ReadCursor, a: *audio_mod.Audio) !void {
         try cursor.readNoEof(std.mem.asBytes(&ch.inst_phase));
         ch.prev_pitch = @truncate(try cursor.readByte());
         ch.prev_vol = @truncate(try cursor.readByte());
+        ch.loop_released = (try cursor.readByte()) != 0;
     }
     try cursor.readNoEof(std.mem.asBytes(&a.music_state.pattern));
     try cursor.readNoEof(std.mem.asBytes(&a.music_state.tick));
     a.music_state.channel_mask = try cursor.readByte();
     try cursor.readNoEof(std.mem.asBytes(&a.music_state.loop_back));
+    a.music_state.playing = (try cursor.readByte()) != 0;
+    try cursor.readNoEof(std.mem.asBytes(&a.music_state.total_patterns));
+    try cursor.readNoEof(std.mem.asBytes(&a.music_state.fade_samples));
+    a.music_state.fade_out = (try cursor.readByte()) != 0;
+    try cursor.readNoEof(std.mem.asBytes(&a.music_state.fade_progress));
     try cursor.readNoEof(std.mem.asBytes(&a.noise_seed));
 }
 
@@ -362,26 +464,20 @@ const lua_serializer =
 fn serializeLuaGlobals(buf: *ByteBuf, alloc: std.mem.Allocator, lua: *zlua.Lua) !void {
     // Load and execute the serializer script
     lua.loadBuffer(lua_serializer, "__pz_ser", .text) catch |err| {
-        std.log.err("save: serializer load error: {}", .{err});
-        const zero: u32 = 0;
-        try bufAppend(buf, alloc, std.mem.asBytes(&zero));
-        return;
+        std.log.warn("save: serializer load error: {}", .{err});
+        return error.LuaSerializerLoadError;
     };
     lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        // Pop error message
+        const err_msg = lua.toString(-1) catch "?";
+        std.log.warn("save: serializer exec error: {s}", .{err_msg});
         lua.pop(1);
-        std.log.err("save: serializer exec error", .{});
-        const zero: u32 = 0;
-        try bufAppend(buf, alloc, std.mem.asBytes(&zero));
-        return;
+        return error.LuaSerializerExecError;
     };
 
     // Get result string
     const script = lua.toString(-1) catch {
         lua.pop(1);
-        const zero: u32 = 0;
-        try bufAppend(buf, alloc, std.mem.asBytes(&zero));
-        return;
+        return error.LuaSerializerResultError;
     };
 
     // Write script length and data
@@ -392,15 +488,14 @@ fn serializeLuaGlobals(buf: *ByteBuf, alloc: std.mem.Allocator, lua: *zlua.Lua) 
     lua.pop(1); // pop result
 }
 
-fn deserializeLuaGlobals(cursor: *ReadCursor, lua: *zlua.Lua) void {
+fn deserializeLuaGlobals(cursor: *ReadCursor, lua: *zlua.Lua) !void {
     var len_bytes: [4]u8 = undefined;
-    cursor.readNoEof(&len_bytes) catch return;
+    try cursor.readNoEof(&len_bytes);
     const script_len: u32 = std.mem.bytesToValue(u32, &len_bytes);
 
     if (script_len == 0) return;
     if (cursor.pos + script_len > cursor.data.len) {
-        std.log.err("load: script extends past end of data", .{});
-        return;
+        return error.InvalidSaveState;
     }
 
     const script = cursor.data[cursor.pos..][0..script_len];
@@ -409,15 +504,15 @@ fn deserializeLuaGlobals(cursor: *ReadCursor, lua: *zlua.Lua) void {
     // Execute the restore script
     lua.loadBuffer(script, "save_restore", .text) catch {
         const err_msg = lua.toString(-1) catch "?";
-        std.log.err("load: restore script parse error: {s}", .{err_msg});
+        std.log.warn("load: restore script parse error: {s}", .{err_msg});
         lua.pop(1);
-        return;
+        return error.LuaRestoreParseError;
     };
     lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
         const err_msg = lua.toString(-1) catch "?";
-        std.log.err("load: restore script exec error: {s}", .{err_msg});
+        std.log.warn("load: restore script exec error: {s}", .{err_msg});
         lua.pop(1);
-        return;
+        return error.LuaRestoreExecError;
     };
     // Fixup: re-create closure methods on object instances
     // Many PICO-8 games (Celeste etc.) attach closure methods (move, collide, etc.)
@@ -425,13 +520,13 @@ fn deserializeLuaGlobals(cursor: *ReadCursor, lua: *zlua.Lua) void {
     // re-create them by calling init_object and copying saved data fields over.
     lua.loadBuffer(lua_fixup, "__pz_fixup", .text) catch {
         lua.pop(1);
-        return;
+        return error.LuaFixupLoadError;
     };
     lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
         const err_msg = lua.toString(-1) catch "?";
-        std.log.err("load: fixup script error: {s}", .{err_msg});
+        std.log.warn("load: fixup script error: {s}", .{err_msg});
         lua.pop(1);
-        return;
+        return error.LuaFixupExecError;
     };
 }
 

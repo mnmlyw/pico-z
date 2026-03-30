@@ -46,4 +46,20 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run pico-z");
     run_step.dependOn(&run_cmd.step);
+
+    // Tests
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_mod.addImport("zlua", zlua_dep.module("zlua"));
+    test_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+
+    const tests = b.addTest(.{
+        .root_module = test_mod,
+    });
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
 }

@@ -9,10 +9,12 @@ const optNum = api_mod.optNum;
 const optInt = api_mod.optInt;
 const getPico = api_mod.getPico;
 
-var rng_state: u64 = 0;
-
 fn toFixed(v: f64) i32 {
-    return @intFromFloat(v * 65536.0);
+    const scaled = v * 65536.0;
+    if (scaled != scaled) return 0; // NaN
+    if (scaled >= 2147483647.0) return 2147483647;
+    if (scaled <= -2147483648.0) return -2147483648;
+    return @intFromFloat(scaled);
 }
 
 fn fromFixed(v: i32) f64 {
@@ -144,7 +146,7 @@ pub fn api_mid(lua: *zlua.Lua) i32 {
 }
 
 pub fn api_rnd(lua: *zlua.Lua) i32 {
-    _ = getPico(lua);
+    const pico = getPico(lua);
     const max_val = optNum(lua, 1, 1.0);
 
     // If argument is a table, return random element
@@ -154,31 +156,31 @@ pub fn api_rnd(lua: *zlua.Lua) i32 {
             lua.pushNil();
             return 1;
         }
-        const idx = @mod(xorshift(), len) + 1;
+        const idx = @mod(xorshift(pico), len) + 1;
         _ = lua.rawGetIndex(1, @intCast(idx));
         return 1;
     }
 
-    const r = @as(f64, @floatFromInt(xorshift())) / 4294967296.0;
+    const r = @as(f64, @floatFromInt(xorshift(pico))) / 4294967296.0;
     lua.pushNumber(r * max_val);
     return 1;
 }
 
-fn xorshift() u32 {
-    if (rng_state == 0) rng_state = 0x12345678;
-    var s = @as(u32, @truncate(rng_state));
+fn xorshift(pico: *api_mod.PicoState) u32 {
+    if (pico.rng_state == 0) pico.rng_state = 0x12345678;
+    var s = pico.rng_state;
     s ^= s << 13;
     s ^= s >> 17;
     s ^= s << 5;
-    rng_state = s;
+    pico.rng_state = s;
     return s;
 }
 
 pub fn api_srand(lua: *zlua.Lua) i32 {
-    _ = getPico(lua);
+    const pico = getPico(lua);
     const v = luaToNum(lua, 1);
-    rng_state = @bitCast(@as(i64, @intFromFloat(v * 65536.0)));
-    if (rng_state == 0) rng_state = 1;
+    pico.rng_state = @truncate(@as(u64, @bitCast(@as(i64, toFixed(v)))));
+    if (pico.rng_state == 0) pico.rng_state = 1;
     return 0;
 }
 
@@ -349,7 +351,7 @@ pub fn api_tonum(lua: *zlua.Lua) i32 {
         if (flags & 0x2 != 0) {
             // Format flag 0x2: treat as 16.16 fixed-point and shift left 16
             const n = lua.toNumber(1) catch 0;
-            const fixed: i32 = @intFromFloat(n * 65536.0);
+            const fixed: i32 = toFixed(n);
             lua.pushNumber(@as(f64, @floatFromInt(fixed)) / 65536.0);
         } else {
             lua.pushValue(1);
@@ -647,7 +649,15 @@ pub fn api_unpack(lua: *zlua.Lua) i32 {
     _ = getPico(lua);
     if (!lua.isTable(1)) return 0;
     const start = optInt(lua, 2, 1);
-    const end_val = if (lua.isNoneOrNil(3)) @as(i32, @intCast(lua.rawLen(1))) else luaToInt(lua, 3);
+    const end_val = if (!lua.isNoneOrNil(3)) luaToInt(lua, 3) else blk: {
+        // Check for t.n (set by pack) before falling back to rawLen
+        _ = lua.getField(1, "n");
+        defer lua.pop(1);
+        if (lua.isNumber(-1))
+            break :blk @as(i32, @intFromFloat(lua.toNumber(-1) catch 0))
+        else
+            break :blk @as(i32, @intCast(lua.rawLen(1)));
+    };
     var i = start;
     var count: i32 = 0;
     while (i <= end_val) : (i += 1) {
@@ -751,7 +761,7 @@ pub fn api_split(lua: *zlua.Lua) i32 {
     // When separator is a number n, split into n-character groups
     if (lua.isNumber(2)) {
         const n_raw = lua.toNumber(2) catch 1;
-        const n: usize = if (n_raw < 1) 1 else @intFromFloat(n_raw);
+        const n: usize = if (n_raw != n_raw or n_raw < 1) 1 else if (n_raw > 255) 255 else @intFromFloat(n_raw);
         var pos: usize = 0;
         while (pos < s.len) {
             const end = @min(pos + n, s.len);

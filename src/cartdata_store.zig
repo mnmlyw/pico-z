@@ -17,7 +17,8 @@ fn sanitizeId(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     errdefer out.deinit(allocator);
 
     for (id) |c| {
-        if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.') {
+        // Keep the mapping injective by never allowing '_' through verbatim.
+        if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '-' or c == '.') {
             try out.append(allocator, c);
         } else {
             try out.append(allocator, '_');
@@ -31,7 +32,7 @@ fn sanitizeId(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn pathForId(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
+pub fn pathForId(allocator: std.mem.Allocator, id: []const u8) ![]u8 {
     const safe_id = try sanitizeId(allocator, id);
     defer allocator.free(safe_id);
     return std.fmt.allocPrint(allocator, "{s}/{s}.dat", .{ CARTDATA_DIR, safe_id });
@@ -105,4 +106,14 @@ test "cartdata load missing zeroes memory" {
     for (cartDataSlice(&mem)) |b| {
         try std.testing.expectEqual(@as(u8, 0), b);
     }
+}
+
+test "cartdata ids with escape-like text do not collide" {
+    const allocator = std.testing.allocator;
+    const escaped_path = try pathForId(allocator, "/");
+    defer allocator.free(escaped_path);
+    const literal_path = try pathForId(allocator, "_2f");
+    defer allocator.free(literal_path);
+
+    try std.testing.expect(!std.mem.eql(u8, escaped_path, literal_path));
 }

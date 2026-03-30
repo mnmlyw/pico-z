@@ -18,7 +18,7 @@ pub const PicoState = struct {
     input: *input_mod.Input,
     audio: ?*audio_mod.Audio,
     frame_count: u32 = 0,
-    start_time: i64 = 0,
+    elapsed_time: f64 = 0, // seconds since cart started (frame-counted)
 
     // Line drawing state
     line_x: i32 = 0,
@@ -30,6 +30,7 @@ pub const PicoState = struct {
     cart_data_dirty: bool = false,
     allocator: std.mem.Allocator,
     target_fps: u8 = 30,
+    rng_state: u32 = 1,
 
     // Multi-cart loading
     pending_load: ?[256]u8 = null,
@@ -44,6 +45,7 @@ pub const PicoState = struct {
 
     // Keyboard scancode state for stat(28)
     key_states: ?[*c]const bool = null,
+    key_states_count: c_int = 0,
 };
 
 pub fn getPico(lua: *zlua.Lua) *PicoState {
@@ -191,6 +193,33 @@ pub fn registerAll(lua: *zlua.Lua, pico: *PicoState) void {
     registerStringIndex(lua);
 }
 
+pub fn prepareForCartLoad(pico: *PicoState) void {
+    if (pico.audio) |audio| {
+        audio.resetState();
+    }
+    pico.rng_state = 1;
+    pico.elapsed_time = 0;
+    pico.frame_count = 0;
+    pico.line_x = 0;
+    pico.line_y = 0;
+    pico.line_valid = false;
+}
+
+pub fn flushCartdata(pico: *PicoState) void {
+    flushCartdataWith(pico, cartdata_store.save);
+}
+
+pub fn flushCartdataWith(pico: *PicoState, save_fn: anytype) void {
+    if (!pico.cart_data_dirty) return;
+    if (pico.cart_data_id) |id| {
+        save_fn(pico.allocator, pico.memory, id) catch |err| {
+            std.log.warn("cartdata save failed for {s}: {}", .{ id, err });
+            return;
+        };
+    }
+    pico.cart_data_dirty = false;
+}
+
 fn registerTypeOverride(lua: *zlua.Lua) void {
     // PICO-8: type() with no args returns nothing instead of error
     lua.pushClosure(wrapFn(pico8_type), 0);
@@ -296,16 +325,19 @@ fn stringIndexHandler(lua: *zlua.Lua) i32 {
 fn api_peek(lua: *zlua.Lua) c_int {
     const pico = getPico(lua);
     const addr = luaToU16(lua, 1);
-    const n = optInt(lua, 2, 1);
+    const n = @max(optInt(lua, 2, 1), 1);
     if (n == 1) {
         lua.pushNumber(@floatFromInt(pico.memory.peek(addr)));
         return 1;
     }
+    // Cap at 8192 per PICO-8, but also ensure Lua stack has space
+    const count: u16 = @intCast(@min(n, 8192));
+    lua.checkStack(count) catch return 0;
     var i: u16 = 0;
-    while (i < n) : (i += 1) {
+    while (i < count) : (i += 1) {
         lua.pushNumber(@floatFromInt(pico.memory.peek(addr +% i)));
     }
-    return @intCast(n);
+    return @intCast(count);
 }
 
 fn api_poke(lua: *zlua.Lua) c_int {
@@ -335,7 +367,7 @@ fn api_peek2(lua: *zlua.Lua) c_int {
 fn api_poke2(lua: *zlua.Lua) c_int {
     const pico = getPico(lua);
     const addr = luaToU16(lua, 1);
-    const val: u16 = @intFromFloat(luaToNum(lua, 2));
+    const val: u16 = @truncate(@as(u32, @bitCast(safeFloatToI32(luaToNum(lua, 2)))));
     pico.memory.poke16(addr, val);
     return 0;
 }
@@ -354,7 +386,9 @@ fn api_poke4(lua: *zlua.Lua) c_int {
     const pico = getPico(lua);
     const addr = luaToU16(lua, 1);
     const val = luaToNum(lua, 2);
-    const fixed: i32 = @intFromFloat(val * 65536.0);
+    // Clamp to i32 range to prevent overflow panic on large values
+    const scaled = val * 65536.0;
+    const fixed: i32 = if (scaled >= 2147483647.0) @as(i32, 2147483647) else if (scaled <= -2147483648.0) @as(i32, -2147483648) else @intFromFloat(scaled);
     pico.memory.poke32(addr, @bitCast(fixed));
     return 0;
 }
@@ -492,7 +526,7 @@ fn api_stat(lua: *zlua.Lua) c_int {
         28 => {
             // Keyboard scancode check: stat(28, scancode)
             const scancode = optInt(lua, 2, -1);
-            if (scancode >= 0 and pico.key_states != null) {
+            if (scancode >= 0 and scancode < pico.key_states_count and pico.key_states != null) {
                 const states = pico.key_states.?;
                 lua.pushBoolean(states[@intCast(scancode)]);
             } else {
@@ -628,9 +662,7 @@ fn api_stat(lua: *zlua.Lua) c_int {
 
 fn api_time(lua: *zlua.Lua) c_int {
     const pico = getPico(lua);
-    const now = std.time.milliTimestamp();
-    const elapsed = @as(f64, @floatFromInt(now - pico.start_time)) / 1000.0;
-    lua.pushNumber(elapsed);
+    lua.pushNumber(pico.elapsed_time);
     return 1;
 }
 
@@ -655,11 +687,13 @@ fn api_cartdata(lua: *zlua.Lua) c_int {
     }
 
     const owned_id = pico.allocator.dupe(u8, id) catch return 0;
-    pico.cart_data_id = owned_id;
     cartdata_store.load(pico.allocator, pico.memory, owned_id) catch |err| {
+        // Transient I/O error — don't commit the ID so retry is possible
         std.log.warn("cartdata load failed for {s}: {}", .{ owned_id, err });
-        @memset(pico.memory.ram[mem_const.ADDR_CART_DATA .. mem_const.ADDR_CART_DATA + cartdata_store.CARTDATA_BYTES], 0);
+        pico.allocator.free(owned_id);
+        return 0;
     };
+    pico.cart_data_id = owned_id;
     lua.pushBoolean(true);
     return 1;
 }
@@ -684,7 +718,7 @@ fn api_dset(lua: *zlua.Lua) c_int {
     const val = luaToNum(lua, 2);
     if (idx >= 0 and idx < 64) {
         const addr: u16 = mem_const.ADDR_CART_DATA + @as(u16, @intCast(idx)) * 4;
-        const fixed: i32 = @intFromFloat(val * 65536.0);
+        const fixed: i32 = safeFloatToI32(val * 65536.0);
         pico.memory.poke32(addr, @bitCast(fixed));
         if (pico.cart_data_id != null) {
             pico.cart_data_dirty = true;
@@ -727,6 +761,7 @@ fn api_run(lua: *zlua.Lua) c_int {
     // Signal a reload of the current cart
     pico.pending_load = [_]u8{0} ** 256;
     pico.pending_load_len = 0; // empty name = reload current
+    pico.param_str_len = 0;
     _ = lua.raiseErrorStr("cart_run", .{});
     return 0;
 }
@@ -768,12 +803,11 @@ pub fn luaToNum(lua: *zlua.Lua, idx: i32) f64 {
 
 pub fn luaToInt(lua: *zlua.Lua, idx: i32) i32 {
     const n = lua.toNumber(idx) catch 0;
-    return @intFromFloat(n);
+    return safeFloatToI32(n);
 }
 
 pub fn luaToU16(lua: *zlua.Lua, idx: i32) u16 {
-    const n = lua.toNumber(idx) catch 0;
-    const i: i32 = @intFromFloat(n);
+    const i = luaToInt(lua, idx);
     return @truncate(@as(u32, @bitCast(i)));
 }
 
@@ -783,9 +817,16 @@ pub fn luaToU16Opt(lua: *zlua.Lua, idx: i32, default: u16) u16 {
 }
 
 pub fn luaToU8(lua: *zlua.Lua, idx: i32) u8 {
-    const n = lua.toNumber(idx) catch 0;
-    const i: i32 = @intFromFloat(n);
+    const i = luaToInt(lua, idx);
     return @truncate(@as(u32, @bitCast(i)));
+}
+
+/// Convert f64 to i32 safely, handling NaN/Inf/out-of-range by clamping.
+pub fn safeFloatToI32(n: f64) i32 {
+    if (n != n) return 0; // NaN
+    if (n >= 2147483647.0) return 2147483647;
+    if (n <= -2147483648.0) return -2147483648;
+    return @intFromFloat(n);
 }
 
 pub fn optInt(lua: *zlua.Lua, idx: i32, default: i32) i32 {

@@ -40,28 +40,23 @@ pub const LuaEngine = struct {
     pub fn loadCart(self: *LuaEngine, cart: *const cart_mod.Cart, allocator: std.mem.Allocator) !void {
         // Preprocess PICO-8 Lua to standard Lua 5.2
         const processed = try preprocessor.preprocess(allocator, cart.lua_code);
+        errdefer allocator.free(processed);
 
-        // Store processed source for reinit (free old one if any)
-        if (self.processed_source) |old| allocator.free(old);
-        self.processed_source = processed;
-
-        // Debug: dump preprocessed source
-        if (std.fs.cwd().createFile("/tmp/preprocessed.lua", .{})) |f| {
-            defer f.close();
-            f.writeAll(processed) catch {};
-        } else |_| {}
-
-        // Load and execute the processed code
+        // Load and execute the processed code — don't replace source until success
         self.lua.loadBuffer(processed, "cart", .text) catch {
             self.captureError();
             std.log.err("lua load error: {s}", .{self.getErrorMsg()});
-            return;
+            return error.LuaLoadError;
         };
         self.lua.protectedCall(.{ .results = zlua.mult_return }) catch {
             self.captureError();
             std.log.err("lua exec error: {s}", .{self.getErrorMsg()});
-            return;
+            return error.LuaExecError;
         };
+
+        // Success — now commit the new source
+        if (self.processed_source) |old| allocator.free(old);
+        self.processed_source = processed;
 
         // Detect lifecycle functions
         self.has_init = self.hasGlobal("_init");
@@ -73,43 +68,46 @@ pub const LuaEngine = struct {
     pub fn callInit(self: *LuaEngine) void {
         if (self.had_error) return;
         if (self.has_init) {
-            self.callGlobal("_init");
+            self.callGlobal("_init", true);
         }
     }
 
     pub fn callUpdate(self: *LuaEngine) void {
+        self.callUpdateWithLogging(true);
+    }
+
+    pub fn callUpdateWithLogging(self: *LuaEngine, log_runtime_errors: bool) void {
         if (self.had_error) return;
         if (self.has_update60) {
-            self.callGlobal("_update60");
+            self.callGlobal("_update60", log_runtime_errors);
         } else if (self.has_update) {
-            self.callGlobal("_update");
+            self.callGlobal("_update", log_runtime_errors);
         }
     }
 
     pub fn callDraw(self: *LuaEngine) void {
         if (self.had_error) return;
         if (self.has_draw) {
-            self.callGlobal("_draw");
+            self.callGlobal("_draw", true);
         }
     }
 
-    fn callGlobal(self: *LuaEngine, name: [:0]const u8) void {
+    fn callGlobal(self: *LuaEngine, name: [:0]const u8, log_runtime_errors: bool) void {
         _ = self.lua.getGlobal(name) catch {
             self.captureError();
             return;
         };
         self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
             // Check if this is a cart load/run signal (not a real error)
-            if (self.lua.toString(-1)) |msg| {
-                if (std.mem.indexOf(u8, msg, "cart_load") != null or
-                    std.mem.indexOf(u8, msg, "cart_run") != null)
-                {
-                    self.lua.pop(1);
-                    return; // Not a real error — main loop will handle the load
-                }
-            } else |_| {}
+            // Only suppress if a pending load was actually requested
+            if (self.pico.pending_load != null) {
+                self.lua.pop(1);
+                return; // Not a real error — main loop will handle the load
+            }
             self.captureError();
-            std.log.err("lua runtime error in {s}: {s}", .{ name, self.getErrorMsg() });
+            if (log_runtime_errors) {
+                std.log.err("lua runtime error in {s}: {s}", .{ name, self.getErrorMsg() });
+            }
             return;
         };
     }
@@ -164,28 +162,39 @@ pub const LuaEngine = struct {
         }
     }
 
-    /// Destroy and recreate the Lua VM, re-execute cart source (without calling _init).
-    /// Used by save state load to recreate all functions before restoring globals.
-    pub fn reinit(self: *LuaEngine) !void {
+    /// Destroy and recreate the Lua VM without executing any cart source.
+    /// Used before loading a new cart to get a clean VM state.
+    pub fn resetVM(self: *LuaEngine) !void {
+        const new_lua = try zlua.Lua.init(self.allocator);
         self.lua.deinit();
-        self.lua = try zlua.Lua.init(self.allocator);
+        self.lua = new_lua;
         self.lua.openLibs();
         sandboxGlobals(self.lua);
         api.registerAll(self.lua, self.pico);
 
         self.had_error = false;
         self.error_len = 0;
+        self.has_init = false;
+        self.has_update = false;
+        self.has_update60 = false;
+        self.has_draw = false;
+    }
+
+    /// Destroy and recreate the Lua VM, re-execute cart source (without calling _init).
+    /// Used by save state load to recreate all functions before restoring globals.
+    pub fn reinit(self: *LuaEngine) !void {
+        try self.resetVM();
 
         if (self.processed_source) |source| {
             self.lua.loadBuffer(source, "cart", .text) catch {
                 self.captureError();
                 std.log.err("lua load error on reinit: {s}", .{self.getErrorMsg()});
-                return;
+                return error.LuaLoadError;
             };
             self.lua.protectedCall(.{ .results = zlua.mult_return }) catch {
                 self.captureError();
                 std.log.err("lua exec error on reinit: {s}", .{self.getErrorMsg()});
-                return;
+                return error.LuaExecError;
             };
 
             self.has_init = self.hasGlobal("_init");

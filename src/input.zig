@@ -120,6 +120,10 @@ pub const Input = struct {
             self.key_chars_len += 1;
         }
     }
+
+    pub fn addMouseWheelDelta(self: *Input, delta: f32) void {
+        self.mouse_wheel += @intFromFloat(delta);
+    }
 };
 
 pub fn api_btn(lua: *zlua.Lua) c_int {
@@ -160,4 +164,3 @@ pub fn api_btnp(lua: *zlua.Lua) c_int {
     lua.pushBoolean(pico.input.btnp(button, player, mem));
     return 1;
 }
-

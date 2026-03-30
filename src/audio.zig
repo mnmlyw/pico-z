@@ -6,6 +6,7 @@ const mem_const = @import("memory.zig");
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
 });
+pub const sdl = c;
 
 const SAMPLE_RATE = 22050;
 const SAMPLES_PER_TICK = 183; // 22050 / 120.49 ≈ 183 samples per note at speed 1
@@ -48,6 +49,7 @@ const Channel = struct {
     inst_phase: f64 = 0,
     prev_pitch: u6 = 0, // for retrigger detection
     prev_vol: u3 = 0,
+    loop_released: bool = false, // sfx(-2) sets this to ignore loop without mutating RAM
 };
 
 const MusicState = struct {
@@ -87,7 +89,7 @@ pub const Audio = struct {
         self.stream = c.SDL_OpenAudioDeviceStream(
             c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
             &spec,
-            audioCallback,
+            audioStreamCallback,
             @ptrCast(self),
         );
         if (self.stream) |s| {
@@ -99,6 +101,16 @@ pub const Audio = struct {
         if (self.stream) |s| {
             c.SDL_DestroyAudioStream(s);
         }
+    }
+
+    pub fn resetState(self: *Audio) void {
+        self.lockStream();
+        defer self.unlockStream();
+        self.channels = .{Channel{}} ** NUM_CHANNELS;
+        self.music_state = MusicState{};
+        self.noise_seed = 1;
+        // Flush any buffered samples so old audio doesn't leak through
+        if (self.stream) |s| _ = c.SDL_ClearAudioStream(s);
     }
 
     pub fn playSfx(self: *Audio, sfx_id: i32, channel_req: i32, offset: i32) void {
@@ -146,7 +158,7 @@ pub const Audio = struct {
 
         self.channels[ch] = Channel{
             .sfx_id = @intCast(sfx_id),
-            .note_index = if (offset >= 0) @intCast(offset) else 0,
+            .note_index = if (offset >= 0 and offset < 32) @intCast(offset) else 0,
             .sub_tick = 0,
             .phase = 0,
             .finished = false,
@@ -167,11 +179,15 @@ pub const Audio = struct {
                 self.music_state.fade_progress = 0;
                 self.music_state.fade_out = true;
             } else {
+                // Stop music channels immediately
+                self.stopMusicChannels();
                 self.music_state.pattern = -1;
                 self.music_state.playing = false;
             }
             return;
         }
+
+        if (pattern >= 64) return;
 
         self.music_state = MusicState{
             .pattern = @intCast(pattern),
@@ -215,11 +231,18 @@ pub const Audio = struct {
         self.channels[ch].finished = true;
     }
 
+    fn stopMusicChannels(self: *Audio) void {
+        for (0..NUM_CHANNELS) |i| {
+            if (self.music_state.channel_mask & (@as(u8, 1) << @intCast(i)) != 0) {
+                self.stopChannel(i);
+            }
+        }
+    }
+
     fn releaseLoop(self: *Audio, ch: usize) void {
         if (self.channels[ch].sfx_id < 0) return;
-        // Clear loop end so SFX plays through to note 32 and stops
-        const sfx_base: u16 = mem_const.ADDR_SFX + @as(u16, @intCast(self.channels[ch].sfx_id)) * 68;
-        self.memory.ram[sfx_base + 3] = 0; // loop_end = 0 means no loop
+        // Mark channel to ignore loop — plays through to note 32 without mutating RAM
+        self.channels[ch].loop_released = true;
     }
 
     fn readNote(self: *Audio, ch: usize) void {
@@ -293,12 +316,15 @@ pub const Audio = struct {
         return 65.41 * std.math.pow(f64, 2.0, n / 12.0);
     }
 
-    fn generateSampleIndexed(self: *Audio) f32 {
-        var mix: f32 = 0;
+    pub fn generateSampleIndexed(self: *Audio) f32 {
+        var music_mix: f32 = 0;
+        var sfx_mix: f32 = 0;
 
         for (0..NUM_CHANNELS) |i| {
             var ch = &self.channels[i];
             if (ch.finished or ch.sfx_id < 0) continue;
+            const is_music_ch = self.music_state.playing and
+                (self.music_state.channel_mask & (@as(u8, 1) << @intCast(i)) != 0);
 
             const sfx_base: u16 = mem_const.ADDR_SFX + @as(u16, @intCast(ch.sfx_id)) * 68;
 
@@ -389,7 +415,12 @@ pub const Audio = struct {
                     ) * 0.7;
                 } else oscillate(child_wf, ch.inst_phase);
 
-                mix += sample * combined_vol * 0.25;
+                const inst_out = sample * combined_vol * 0.25;
+                if (is_music_ch) {
+                    music_mix += inst_out;
+                } else {
+                    sfx_mix += inst_out;
+                }
                 ch.inst_phase += child_freq / @as(f64, SAMPLE_RATE);
 
                 // Advance child instrument at its own speed
@@ -429,7 +460,12 @@ pub const Audio = struct {
                         1.0,
                     ) * 0.7;
                 } else oscillate(ch.waveform, ch.phase);
-                mix += sample * ch.volume * 0.25;
+                const ch_out = sample * ch.volume * 0.25;
+                if (is_music_ch) {
+                    music_mix += ch_out;
+                } else {
+                    sfx_mix += ch_out;
+                }
             }
 
             // Phase accumulates freely (no wrapping at 1.0) for organ/phaser detuning
@@ -445,6 +481,18 @@ pub const Audio = struct {
             if (ch.sub_tick >= samples_per_note) {
                 ch.sub_tick = 0;
                 ch.note_index += 1;
+                // Advance music tick when channel 0 (or first active music channel) advances
+                if (self.music_state.playing and self.music_state.channel_mask & (@as(u8, 1) << @intCast(i)) != 0) {
+                    // Only count from the lowest active channel to avoid double-counting
+                    var first_music_ch: usize = 0;
+                    for (0..NUM_CHANNELS) |c_i| {
+                        if (self.music_state.channel_mask & (@as(u8, 1) << @intCast(c_i)) != 0 and !self.channels[c_i].finished) {
+                            first_music_ch = c_i;
+                            break;
+                        }
+                    }
+                    if (i == first_music_ch) self.music_state.tick += 1;
+                }
 
                 const loop_end = self.memory.ram[sfx_base + 3];
                 const loop_start = self.memory.ram[sfx_base + 2];
@@ -452,7 +500,7 @@ pub const Audio = struct {
                 if (ch.note_index >= 32) {
                     ch.finished = true;
                     self.advanceMusic();
-                } else if (loop_end > 0 and ch.note_index >= loop_end) {
+                } else if (!ch.loop_released and loop_end > 0 and ch.note_index >= loop_end) {
                     if (loop_start < loop_end) {
                         ch.note_index = loop_start;
                     } else {
@@ -467,22 +515,24 @@ pub const Audio = struct {
             }
         }
 
-        // Apply music fade
+        // Apply music fade only to music channels
         if (self.music_state.fade_out and self.music_state.fade_samples > 0) {
             self.music_state.fade_progress += 1;
             if (self.music_state.fade_progress >= self.music_state.fade_samples) {
-                // Fade complete — stop music
+                // Fade complete — stop music and its channels
+                self.stopMusicChannels();
                 self.music_state.pattern = -1;
                 self.music_state.playing = false;
                 self.music_state.fade_out = false;
                 self.music_state.fade_samples = 0;
-                return 0;
+                // music_mix is at ~0 volume; just return sfx
+                music_mix = 0;
             }
             const fade_vol = 1.0 - @as(f32, @floatFromInt(self.music_state.fade_progress)) / @as(f32, @floatFromInt(self.music_state.fade_samples));
-            mix *= fade_vol;
+            music_mix *= fade_vol;
         }
 
-        return std.math.clamp(mix, -1.0, 1.0);
+        return std.math.clamp(music_mix + sfx_mix, -1.0, 1.0);
     }
 
     fn advanceMusic(self: *Audio) void {
@@ -529,16 +579,23 @@ pub const Audio = struct {
     }
 };
 
-fn audioCallback(userdata: ?*anyopaque, stream: ?*c.SDL_AudioStream, additional_amount: c_int, _: c_int) callconv(.c) void {
+pub fn audioStreamCallback(userdata: ?*anyopaque, stream: ?*c.SDL_AudioStream, additional_amount: c_int, _: c_int) callconv(.c) void {
+    if (userdata == null or stream == null or additional_amount <= 0) return;
     const audio: *Audio = @ptrCast(@alignCast(userdata));
-    const num_samples: usize = @intCast(@divExact(additional_amount, 2));
+    const sample_bytes = @sizeOf(i16);
+    var remaining_bytes: usize = @intCast(additional_amount);
+    remaining_bytes -= @rem(remaining_bytes, sample_bytes);
     var buf: [4096]i16 = undefined;
-    const count = @min(num_samples, buf.len);
-    for (0..count) |s| {
-        const sample = audio.generateSampleIndexed();
-        buf[s] = @intFromFloat(sample * 28000.0);
+    while (remaining_bytes > 0) {
+        const chunk_bytes = @min(remaining_bytes, buf.len * sample_bytes);
+        const sample_count = chunk_bytes / sample_bytes;
+        for (0..sample_count) |s| {
+            const sample = audio.generateSampleIndexed();
+            buf[s] = @intFromFloat(sample * 28000.0);
+        }
+        _ = c.SDL_PutAudioStreamData(stream, &buf, @intCast(chunk_bytes));
+        remaining_bytes -= chunk_bytes;
     }
-    _ = c.SDL_PutAudioStreamData(stream, &buf, @intCast(count * 2));
 }
 
 fn oscillate(waveform: Waveform, phase: f64) f32 {
@@ -602,4 +659,3 @@ pub fn api_music(lua: *zlua.Lua) i32 {
     }
     return 0;
 }
-

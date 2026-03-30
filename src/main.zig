@@ -88,7 +88,6 @@ pub fn main() !void {
         .pixel_buffer = &pixel_buffer,
         .input = &input,
         .audio = &audio,
-        .start_time = std.time.milliTimestamp(),
         .allocator = allocator,
     };
     defer if (pico.cart_data_id) |id| allocator.free(id);
@@ -104,10 +103,10 @@ pub fn main() !void {
     defer if (owned_cart_path) |p| allocator.free(p);
 
     if (cart_path) |path| {
-        loadCart(&lua_engine, &memory, allocator, path) catch |err| {
+        pico.param_str_len = 0;
+        loadCart(&pico, &lua_engine, allocator, path) catch |err| {
             std.log.err("failed to load cart: {}", .{err});
         };
-        pico.cart_dir = std.fs.path.dirname(path);
     }
 
     // Main loop
@@ -116,6 +115,9 @@ pub fn main() !void {
 
     while (running) {
         const frame_start = std.time.nanoTimestamp();
+
+        // Reset per-frame input state before polling new events
+        input.mouse_wheel = 0;
 
         // Poll events
         var event: c.SDL_Event = undefined;
@@ -143,7 +145,8 @@ pub fn main() !void {
                 }
                 if (event.key.key == c.SDLK_R) {
                     if (current_cart_path) |path| {
-                        loadCart(&lua_engine, &memory, allocator, path) catch |err| {
+                        pico.param_str_len = 0;
+                        loadCart(&pico, &lua_engine, allocator, path) catch |err| {
                             std.log.err("cart reload failed: {}", .{err});
                         };
                         indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
@@ -157,16 +160,11 @@ pub fn main() !void {
                         std.log.err("failed to store dropped cart path", .{});
                         continue;
                     };
-                    if (loadCart(&lua_engine, &memory, allocator, new_path)) |_| {
+                    pico.param_str_len = 0;
+                    if (loadCart(&pico, &lua_engine, allocator, new_path)) |_| {
                         if (owned_cart_path) |p| allocator.free(p);
                         owned_cart_path = new_path;
                         current_cart_path = new_path;
-                        pico.cart_dir = std.fs.path.dirname(new_path);
-                        if (pico.cart_data_id) |id| {
-                            allocator.free(id);
-                            pico.cart_data_id = null;
-                        }
-                        pico.cart_data_dirty = false;
                     } else |err| {
                         allocator.free(new_path);
                         std.log.err("failed to load dropped cart: {}", .{err});
@@ -198,7 +196,7 @@ pub fn main() !void {
                 }
             }
             if (event.type == c.SDL_EVENT_MOUSE_WHEEL) {
-                input.mouse_wheel = @intFromFloat(event.wheel.y);
+                input.addMouseWheelDelta(event.wheel.y);
             }
             if (event.type == c.SDL_EVENT_TEXT_INPUT) {
                 if (event.text.text[0] != 0) {
@@ -207,14 +205,13 @@ pub fn main() !void {
             }
         }
 
-        // Reset per-frame input state
-        input.mouse_wheel = 0;
-
         // Update input and sync to PICO-8 memory
         input.update();
         memory.ram[0x5F4C] = input.btn_state[0];
         memory.ram[0x5F4D] = input.btn_state[1];
-        pico.key_states = c.SDL_GetKeyboardState(null);
+        var numkeys: c_int = 0;
+        pico.key_states = c.SDL_GetKeyboardState(&numkeys);
+        pico.key_states_count = numkeys;
 
         // Run cart — at 30fps, if previous frame overran, call _update twice
         if (frame_overran and !lua_engine.use60fps()) {
@@ -233,7 +230,7 @@ pub fn main() !void {
             if (name_len == 0) {
                 // run() — reload current cart
                 if (current_cart_path) |path| {
-                    loadCart(&lua_engine, &memory, allocator, path) catch |err| {
+                    loadCart(&pico, &lua_engine, allocator, path) catch |err| {
                         std.log.err("run() reload failed: {}", .{err});
                     };
                 }
@@ -249,16 +246,10 @@ pub fn main() !void {
                 const path = load_path orelse allocator.dupe(u8, name) catch null;
 
                 if (path) |p| {
-                    if (loadCart(&lua_engine, &memory, allocator, p)) |_| {
+                    if (loadCart(&pico, &lua_engine, allocator, p)) |_| {
                         if (owned_cart_path) |old| allocator.free(old);
                         owned_cart_path = p;
                         current_cart_path = p;
-                        pico.cart_dir = std.fs.path.dirname(p);
-                        if (pico.cart_data_id) |id| {
-                            allocator.free(id);
-                            pico.cart_data_id = null;
-                        }
-                        pico.cart_data_dirty = false;
                     } else |err| {
                         allocator.free(p);
                         std.log.err("load() failed for {s}: {}", .{ name, err });
@@ -268,14 +259,7 @@ pub fn main() !void {
         }
 
         // Flush dirty cartdata once per frame
-        if (pico.cart_data_dirty) {
-            if (pico.cart_data_id) |id| {
-                cartdata_store.save(pico.allocator, pico.memory, id) catch |err| {
-                    std.log.warn("cartdata save failed for {s}: {}", .{ id, err });
-                };
-            }
-            pico.cart_data_dirty = false;
-        }
+        api.flushCartdata(&pico);
 
         // Error display
         if (lua_engine.had_error) {
@@ -308,8 +292,9 @@ pub fn main() !void {
 
         pico.frame_count += 1;
 
-        // Frame timing
+        // Frame timing — update fps first so elapsed_time uses the correct rate
         pico.target_fps = if (lua_engine.use60fps()) 60 else 30;
+        pico.elapsed_time += 1.0 / @as(f64, @floatFromInt(pico.target_fps));
         const frame_time_ns: u64 = 1_000_000_000 / @as(u64, pico.target_fps);
         const frame_end = std.time.nanoTimestamp();
         const elapsed: u64 = @intCast(frame_end - frame_start);
@@ -320,9 +305,12 @@ pub fn main() !void {
     }
 }
 
-fn loadCart(lua_engine: *LuaEngine, memory: *Memory, allocator: std.mem.Allocator, path: []const u8) !void {
+pub fn loadCart(pico: *api.PicoState, lua_engine: *LuaEngine, allocator: std.mem.Allocator, path: []const u8) !void {
+    const memory = pico.memory;
     var next_memory = Memory.init();
     next_memory.initDrawState();
+    const saved_cart_dir = pico.cart_dir;
+    const next_cart_dir = std.fs.path.dirname(path);
 
     var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
         try cart_mod.loadP8PngFile(allocator, path, &next_memory)
@@ -330,10 +318,53 @@ fn loadCart(lua_engine: *LuaEngine, memory: *Memory, allocator: std.mem.Allocato
         try cart_mod.loadP8File(allocator, path, &next_memory);
     defer cart.deinit();
 
+    // Persist dirty cartdata before replacing RAM/ROM with a new cart.
+    api.flushCartdata(pico);
+    if (pico.cart_data_dirty) return error.CartdataSaveFailed;
+
+    // Save old memory in case Lua loading fails
+    const saved_memory = memory.*;
+
     memory.* = next_memory;
     memory.saveRom();
-    try lua_engine.reinit();
-    try lua_engine.loadCart(&cart, allocator);
+    pico.cart_dir = next_cart_dir;
+
+    // Stop all audio from previous cart
+    api.prepareForCartLoad(pico);
+
+    // Clear cartdata attachment so the new cart can call cartdata() fresh
+    const saved_cart_data_id = pico.cart_data_id;
+    const saved_cart_data_dirty = pico.cart_data_dirty;
+    pico.cart_data_id = null;
+    pico.cart_data_dirty = false;
+
+    // Reset VM without replaying old cart source (fixes stale execution)
+    lua_engine.resetVM() catch |err| {
+        memory.* = saved_memory;
+        pico.cart_dir = saved_cart_dir;
+        pico.cart_data_id = saved_cart_data_id;
+        pico.cart_data_dirty = saved_cart_data_dirty;
+        return err;
+    };
+    lua_engine.loadCart(&cart, allocator) catch |err| {
+        // Lua failed — cold-restart old cart: zero RAM, restore ROM + cartdata
+        @memset(&memory.ram, 0);
+        @memcpy(&memory.rom, &saved_memory.rom);
+        memory.reload(0, 0, 0x4300);
+        // Preserve cartdata region from saved state
+        const cd_start = @import("memory.zig").ADDR_CART_DATA;
+        @memcpy(memory.ram[cd_start .. cd_start + 256], saved_memory.ram[cd_start .. cd_start + 256]);
+        memory.initDrawState();
+        pico.cart_dir = saved_cart_dir;
+        pico.cart_data_id = saved_cart_data_id;
+        pico.cart_data_dirty = saved_cart_data_dirty;
+        lua_engine.reinit() catch {};
+        lua_engine.callInit();
+        return err;
+    };
+
+    // Success — free old cartdata ID (already cleared above, just free the allocation)
+    if (saved_cart_data_id) |id| allocator.free(id);
     lua_engine.callInit();
 }
 
