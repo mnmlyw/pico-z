@@ -233,10 +233,43 @@ function setupAudio() {
   audioNode = node;
 }
 
+function saveStateToStorage() {
+  if (!wasm) return;
+  const len = wasm.web_save_state();
+  if (len === 0) return;
+  const ptr = wasm.web_get_save_ptr();
+  if (!ptr) return;
+  const bytes = new Uint8Array(mem.buffer, ptr, len);
+  // Encode as base64 for localStorage
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  try {
+    localStorage.setItem('pico-z-save', btoa(binary));
+  } catch(e) { console.warn('Save failed:', e); }
+  wasm.web_free_save();
+}
+
+function loadStateFromStorage() {
+  if (!wasm) return;
+  const b64 = localStorage.getItem('pico-z-save');
+  if (!b64) return;
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const ptr = wasm.web_alloc(bytes.length);
+  if (!ptr) return;
+  new Uint8Array(mem.buffer, ptr, bytes.length).set(bytes);
+  wasm.web_load_state(ptr, bytes.length);
+  wasm.web_free(ptr, bytes.length);
+}
+
 function setupInput() {
   document.addEventListener('keydown', (e) => {
     const m = KEY_MAP[e.key];
     if (m) { buttons[m[0]] |= m[1]; e.preventDefault(); }
+    // Save/load state
+    if (e.key === 'p' || e.key === 'P') { saveStateToStorage(); e.preventDefault(); }
+    if (e.key === 'l' || e.key === 'L') { loadStateFromStorage(); e.preventDefault(); }
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   });
   document.addEventListener('keyup', (e) => {

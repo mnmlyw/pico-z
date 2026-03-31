@@ -126,6 +126,36 @@ export fn web_has_error() u32 {
     return if (lua_engine.had_error) 1 else 0;
 }
 
+/// Save state — returns pointer and length. JS should read and free.
+var save_data: ?[]u8 = null;
+export fn web_save_state() u32 {
+    if (!initialized) return 0;
+    const save_state = @import("save_state.zig");
+    if (save_data) |old| wasm_allocator.free(old);
+    save_data = save_state.serializeState(&pico, &lua_engine) catch return 0;
+    return @intCast(save_data.?.len);
+}
+
+export fn web_get_save_ptr() ?[*]const u8 {
+    if (save_data) |d| return d.ptr;
+    return null;
+}
+
+export fn web_free_save() void {
+    if (save_data) |d| {
+        wasm_allocator.free(d);
+        save_data = null;
+    }
+}
+
+/// Load state from JS-provided bytes. Returns 0 on success.
+export fn web_load_state(data_ptr: [*]const u8, data_len: u32) u32 {
+    if (!initialized) return 1;
+    const save_state = @import("save_state.zig");
+    save_state.deserializeState(&pico, &lua_engine, data_ptr[0..data_len]) catch return 1;
+    return 0;
+}
+
 // ── Internal helpers ──
 
 fn loadCartData(data: []const u8) !cart_mod.Cart {

@@ -53,23 +53,17 @@ pub const ReadCursor = struct {
     }
 };
 
-pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []const u8) !void {
+/// Serialize save state to a byte buffer (no file I/O).
+pub fn serializeState(pico: *api.PicoState, lua_engine: *LuaEngine) ![]u8 {
     const alloc = pico.allocator;
-    const save_path = try getSavePath(alloc, cart_path);
-    defer alloc.free(save_path);
-
     var buf: ByteBuf = .empty;
-    defer buf.deinit(alloc);
+    errdefer buf.deinit(alloc);
 
-    // Header
     try bufAppend(&buf, alloc, &MAGIC);
     try bufAppendByte(&buf, alloc, VERSION);
-
-    // 1. RAM + ROM
     try bufAppend(&buf, alloc, &pico.memory.ram);
     try bufAppend(&buf, alloc, &pico.memory.rom);
 
-    // 2. Audio state
     if (pico.audio) |audio| {
         audio.lockStream();
         defer audio.unlockStream();
@@ -78,24 +72,34 @@ pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
         try bufAppendZeros(&buf, alloc, audioStateSize());
     }
 
-    // 3. Input state
     try writeInputState(&buf, alloc, pico.input);
-
-    // 4. Pico fields
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.frame_count));
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.elapsed_time));
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.line_x));
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.line_y));
     try bufAppendByte(&buf, alloc, if (pico.line_valid) 1 else 0);
     try bufAppend(&buf, alloc, std.mem.asBytes(&pico.rng_state));
-
-    // 5. Lua globals (as Lua script)
     try serializeLuaGlobals(&buf, alloc, lua_engine.lua);
 
-    // Write to file atomically to avoid partial save corruption.
-    try fs_atomic.writeFileAtomic(alloc, std.fs.cwd(), save_path, buf.items);
+    return buf.toOwnedSlice(alloc);
+}
 
+pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []const u8) !void {
+    const alloc = pico.allocator;
+    const save_path = try getSavePath(alloc, cart_path);
+    defer alloc.free(save_path);
+
+    const data = try serializeState(pico, lua_engine);
+    defer alloc.free(data);
+
+    try fs_atomic.writeFileAtomic(alloc, std.fs.cwd(), save_path, data);
     std.log.info("save state written to {s}", .{save_path});
+}
+
+/// Deserialize save state from a byte buffer (no file I/O).
+pub fn deserializeState(pico: *api.PicoState, lua_engine: *LuaEngine, data: []const u8) !void {
+    var cursor = ReadCursor{ .data = data };
+    return loadStateFromCursor(pico, lua_engine, &cursor);
 }
 
 pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []const u8) !void {
@@ -112,6 +116,11 @@ pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     defer alloc.free(data);
 
     var cursor = ReadCursor{ .data = data };
+    return loadStateFromCursor(pico, lua_engine, &cursor);
+}
+
+fn loadStateFromCursor(pico: *api.PicoState, lua_engine: *LuaEngine, cursor: *ReadCursor) !void {
+    const alloc = pico.allocator;
 
     // Header
     var magic: [4]u8 = undefined;
@@ -130,14 +139,14 @@ pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     var staged_audio: ?audio_mod.Audio = null;
     if (pico.audio != null) {
         var audio = audio_mod.Audio.init(pico.memory);
-        try readAudioState(&cursor, &audio);
+        try readAudioState(cursor, &audio);
         staged_audio = audio;
     } else {
         try cursor.skip(audioStateSize());
     }
 
     var staged_input = pico.input.*;
-    try readInputState(&cursor, &staged_input);
+    try readInputState(cursor, &staged_input);
 
     var staged_frame_count: u32 = undefined;
     var staged_elapsed_time: f64 = undefined;
@@ -211,7 +220,7 @@ pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
         staged_engine.processed_source = try alloc.dupe(u8, source);
     }
     try staged_engine.reinit();
-    try deserializeLuaGlobals(&cursor, staged_engine.lua);
+    try deserializeLuaGlobals(cursor, staged_engine.lua);
 
     pico.audio = saved_audio_ptr;
     if (saved_audio_ptr) |audio| {
@@ -224,7 +233,7 @@ pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     lua_engine.deinit();
     lua_engine.* = staged_engine;
     restore_host = false;
-    std.log.info("save state loaded from {s}", .{save_path});
+    std.log.info("save state loaded", .{});
 }
 
 fn applyAudioRuntime(dst: *audio_mod.Audio, src: *const audio_mod.Audio) void {
@@ -234,7 +243,11 @@ fn applyAudioRuntime(dst: *audio_mod.Audio, src: *const audio_mod.Audio) void {
 }
 
 fn clearAudioStream(audio: *audio_mod.Audio) void {
-    if (audio.stream) |stream| _ = audio_mod.sdl.SDL_ClearAudioStream(stream);
+    const builtin = @import("builtin");
+    const is_native = (builtin.os.tag != .freestanding and builtin.os.tag != .wasi);
+    if (is_native) {
+        if (audio.stream) |stream| _ = audio_mod.sdl.SDL_ClearAudioStream(stream);
+    }
 }
 
 // --- Audio serialization ---
