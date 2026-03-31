@@ -1,15 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zlua = @import("zlua");
 const api = @import("api.zig");
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const is_native = (builtin.os.tag != .freestanding and builtin.os.tag != .wasi);
+const c = if (is_native) @cImport({ @cInclude("SDL3/SDL.h"); }) else struct {};
 
 pub const Input = struct {
     btn_state: [2]u8 = .{ 0, 0 }, // current state per player
     prev_state: [2]u8 = .{ 0, 0 }, // previous frame
     held_frames: [2][8]u16 = .{ .{0} ** 8, .{0} ** 8 }, // frames held
-    controllers: [2]?*c.SDL_Gamepad = .{ null, null },
+    controllers: if (is_native) [2]?*c.SDL_Gamepad else void = if (is_native) .{ null, null } else {},
     mouse_x: i32 = 0,
     mouse_y: i32 = 0,
     mouse_buttons: u8 = 0, // bit 0=left, bit 1=right, bit 2=middle
@@ -18,6 +18,7 @@ pub const Input = struct {
     key_chars_len: u8 = 0,
 
     pub fn initControllers(self: *Input) void {
+        if (!is_native) return;
         var num_gamepads: c_int = 0;
         const gamepad_ids = c.SDL_GetGamepads(&num_gamepads);
         if (gamepad_ids == null) return;
@@ -31,6 +32,7 @@ pub const Input = struct {
     }
 
     pub fn deinitControllers(self: *Input) void {
+        if (!is_native) return;
         for (&self.controllers) |*ctrl| {
             if (ctrl.*) |gc| {
                 c.SDL_CloseGamepad(gc);
@@ -39,51 +41,48 @@ pub const Input = struct {
         }
     }
 
+    /// Native: polls SDL keyboard/gamepad. Web: btn_state set directly by JS.
     pub fn update(self: *Input) void {
         self.prev_state = self.btn_state;
 
-        const keys = c.SDL_GetKeyboardState(null);
-
-        // Player 0: arrows + Z/C/N (O button) + X/V/M (X button)
-        self.btn_state[0] = 0;
-        if (keys[c.SDL_SCANCODE_LEFT]) self.btn_state[0] |= 0x01;
-        if (keys[c.SDL_SCANCODE_RIGHT]) self.btn_state[0] |= 0x02;
-        if (keys[c.SDL_SCANCODE_UP]) self.btn_state[0] |= 0x04;
-        if (keys[c.SDL_SCANCODE_DOWN]) self.btn_state[0] |= 0x08;
-        if (keys[c.SDL_SCANCODE_Z] or keys[c.SDL_SCANCODE_C] or keys[c.SDL_SCANCODE_N]) self.btn_state[0] |= 0x10;
-        if (keys[c.SDL_SCANCODE_X] or keys[c.SDL_SCANCODE_V] or keys[c.SDL_SCANCODE_M]) self.btn_state[0] |= 0x20;
-
-        // Player 1: ESDF + Tab/Q (O) + W (X) -- less standard but common mapping
-        self.btn_state[1] = 0;
-        if (keys[c.SDL_SCANCODE_S]) self.btn_state[1] |= 0x01;
-        if (keys[c.SDL_SCANCODE_F]) self.btn_state[1] |= 0x02;
-        if (keys[c.SDL_SCANCODE_E]) self.btn_state[1] |= 0x04;
-        if (keys[c.SDL_SCANCODE_D]) self.btn_state[1] |= 0x08;
-        if (keys[c.SDL_SCANCODE_TAB] or keys[c.SDL_SCANCODE_Q]) self.btn_state[1] |= 0x10;
-        if (keys[c.SDL_SCANCODE_W]) self.btn_state[1] |= 0x20;
-
-        // Merge gamepad state
-        for (0..2) |p| {
-            if (self.controllers[p]) |gc| {
-                const deadzone: i16 = 8000;
-                const lx = c.SDL_GetGamepadAxis(gc, c.SDL_GAMEPAD_AXIS_LEFTX);
-                const ly = c.SDL_GetGamepadAxis(gc, c.SDL_GAMEPAD_AXIS_LEFTY);
-                if (lx < -deadzone) self.btn_state[p] |= 0x01; // left
-                if (lx > deadzone) self.btn_state[p] |= 0x02; // right
-                if (ly < -deadzone) self.btn_state[p] |= 0x04; // up
-                if (ly > deadzone) self.btn_state[p] |= 0x08; // down
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_LEFT)) self.btn_state[p] |= 0x01;
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) self.btn_state[p] |= 0x02;
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_UP)) self.btn_state[p] |= 0x04;
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_DOWN)) self.btn_state[p] |= 0x08;
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_SOUTH)) self.btn_state[p] |= 0x10; // O
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_EAST)) self.btn_state[p] |= 0x20; // X
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_WEST)) self.btn_state[p] |= 0x10; // O alt
-                if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_NORTH)) self.btn_state[p] |= 0x20; // X alt
+        if (is_native) {
+            const keys = c.SDL_GetKeyboardState(null);
+            self.btn_state[0] = 0;
+            if (keys[c.SDL_SCANCODE_LEFT]) self.btn_state[0] |= 0x01;
+            if (keys[c.SDL_SCANCODE_RIGHT]) self.btn_state[0] |= 0x02;
+            if (keys[c.SDL_SCANCODE_UP]) self.btn_state[0] |= 0x04;
+            if (keys[c.SDL_SCANCODE_DOWN]) self.btn_state[0] |= 0x08;
+            if (keys[c.SDL_SCANCODE_Z] or keys[c.SDL_SCANCODE_C] or keys[c.SDL_SCANCODE_N]) self.btn_state[0] |= 0x10;
+            if (keys[c.SDL_SCANCODE_X] or keys[c.SDL_SCANCODE_V] or keys[c.SDL_SCANCODE_M]) self.btn_state[0] |= 0x20;
+            self.btn_state[1] = 0;
+            if (keys[c.SDL_SCANCODE_S]) self.btn_state[1] |= 0x01;
+            if (keys[c.SDL_SCANCODE_F]) self.btn_state[1] |= 0x02;
+            if (keys[c.SDL_SCANCODE_E]) self.btn_state[1] |= 0x04;
+            if (keys[c.SDL_SCANCODE_D]) self.btn_state[1] |= 0x08;
+            if (keys[c.SDL_SCANCODE_TAB] or keys[c.SDL_SCANCODE_Q]) self.btn_state[1] |= 0x10;
+            if (keys[c.SDL_SCANCODE_W]) self.btn_state[1] |= 0x20;
+            for (0..2) |p| {
+                if (self.controllers[p]) |gc| {
+                    const deadzone: i16 = 8000;
+                    const lx = c.SDL_GetGamepadAxis(gc, c.SDL_GAMEPAD_AXIS_LEFTX);
+                    const ly = c.SDL_GetGamepadAxis(gc, c.SDL_GAMEPAD_AXIS_LEFTY);
+                    if (lx < -deadzone) self.btn_state[p] |= 0x01;
+                    if (lx > deadzone) self.btn_state[p] |= 0x02;
+                    if (ly < -deadzone) self.btn_state[p] |= 0x04;
+                    if (ly > deadzone) self.btn_state[p] |= 0x08;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_LEFT)) self.btn_state[p] |= 0x01;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) self.btn_state[p] |= 0x02;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_UP)) self.btn_state[p] |= 0x04;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_DPAD_DOWN)) self.btn_state[p] |= 0x08;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_SOUTH)) self.btn_state[p] |= 0x10;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_EAST)) self.btn_state[p] |= 0x20;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_WEST)) self.btn_state[p] |= 0x10;
+                    if (c.SDL_GetGamepadButton(gc, c.SDL_GAMEPAD_BUTTON_NORTH)) self.btn_state[p] |= 0x20;
+                }
             }
         }
 
-        // Update held frame counters
+        // Update held frame counters (works for both native and web)
         for (0..2) |p| {
             for (0..8) |b| {
                 const mask: u8 = @as(u8, 1) << @intCast(b);

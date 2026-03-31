@@ -47,6 +47,39 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run pico-z");
     run_step.dependOn(&run_cmd.step);
 
+    // Web (WASM) build
+    const web_step = b.step("web", "Build WebAssembly module");
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+        .cpu_features_add = std.Target.wasm.featureSet(&.{.exception_handling}),
+    });
+    const zlua_wasm = b.dependency("zlua", .{
+        .target = wasm_target,
+        .optimize = .ReleaseFast,
+        .lang = .lua52,
+    });
+    const web_mod = b.createModule(.{
+        .root_source_file = b.path("src/main_web.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    web_mod.addImport("zlua", zlua_wasm.module("zlua"));
+    // WASI emulation libs for Lua's C code (clock, signal)
+    web_mod.linkSystemLibrary("wasi-emulated-process-clocks", .{});
+    web_mod.linkSystemLibrary("wasi-emulated-signal", .{});
+    const web_lib = b.addExecutable(.{
+        .name = "pico-z",
+        .root_module = web_mod,
+    });
+    web_lib.entry = .disabled;
+    web_lib.rdynamic = true;
+    const web_install = b.addInstallArtifact(web_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "../web" } },
+        .dest_sub_path = "pico-z.wasm",
+    });
+    web_step.dependOn(&web_install.step);
+
     // Tests
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),

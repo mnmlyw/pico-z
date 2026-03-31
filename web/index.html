@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PICO-Z Web</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  #screen { image-rendering: pixelated; image-rendering: crisp-edges; width: 512px; height: 512px; }
+  #drop-zone { position: fixed; inset: 0; display: flex; justify-content: center; align-items: center;
+    color: #fff; font-family: monospace; font-size: 14px; }
+  #drop-zone.has-cart { display: none; }
+  .drag-over { background: rgba(41, 173, 255, 0.1); border: 2px dashed #29ADFF; }
+</style>
+</head>
+<body>
+<div id="drop-zone">Drop a .p8 or .p8.png cart here</div>
+<canvas id="screen" width="128" height="128" style="display:none"></canvas>
+
+<script>
+let wasm, memory, pixelBufPtr, ctx, imageData, audioCtx, audioNode;
+let buttons = [0, 0]; // player 0, player 1
+let running = false;
+let targetFps = 30;
+
+// Key mappings: key -> [player, bit]
+const KEY_MAP = {
+  ArrowLeft:  [0, 0x01], ArrowRight: [0, 0x02], ArrowUp: [0, 0x04], ArrowDown: [0, 0x08],
+  z: [0, 0x10], c: [0, 0x10], n: [0, 0x10], // O button
+  x: [0, 0x20], v: [0, 0x20], m: [0, 0x20], // X button
+  s: [1, 0x01], f: [1, 0x02], e: [1, 0x04], d: [1, 0x08], // P1 dpad
+  Tab: [1, 0x10], q: [1, 0x10], w: [1, 0x20], // P1 buttons
+};
+
+async function init() {
+  const result = await WebAssembly.instantiateStreaming(fetch('pico-z.wasm'), {
+    env: {},
+  });
+  wasm = result.instance.exports;
+  memory = wasm.memory;
+
+  const canvas = document.getElementById('screen');
+  ctx = canvas.getContext('2d');
+  imageData = ctx.createImageData(128, 128);
+
+  setupInput();
+  setupDragDrop();
+}
+
+function loadCart(bytes) {
+  const ptr = wasm.web_alloc(bytes.length);
+  if (!ptr) { console.error('Failed to allocate memory'); return; }
+
+  const wasmBuf = new Uint8Array(memory.buffer, ptr, bytes.length);
+  wasmBuf.set(bytes);
+
+  const err = wasm.web_init(ptr, bytes.length);
+  wasm.web_free(ptr, bytes.length);
+
+  if (err !== 0) { console.error('Failed to load cart'); return; }
+
+  document.getElementById('screen').style.display = 'block';
+  document.getElementById('drop-zone').classList.add('has-cart');
+
+  if (!audioCtx) setupAudio();
+  running = true;
+  requestAnimationFrame(frame);
+}
+
+let lastFrameTime = 0;
+function frame(timestamp) {
+  if (!running) return;
+
+  targetFps = wasm.web_get_fps();
+  const frameInterval = 1000 / targetFps;
+
+  if (timestamp - lastFrameTime >= frameInterval - 1) {
+    lastFrameTime = timestamp;
+
+    wasm.web_set_buttons(0, buttons[0]);
+    wasm.web_set_buttons(1, buttons[1]);
+    wasm.web_update();
+
+    // Read pixel buffer and draw to canvas
+    const bufPtr = wasm.web_get_pixel_buffer();
+    const pixels = new Uint8Array(memory.buffer, bufPtr, 128 * 128 * 4);
+    // ARGB -> RGBA
+    const rgba = imageData.data;
+    for (let i = 0; i < 128 * 128; i++) {
+      rgba[i * 4 + 0] = pixels[i * 4 + 2]; // R <- B (ARGB byte order in LE)
+      rgba[i * 4 + 1] = pixels[i * 4 + 1]; // G <- G
+      rgba[i * 4 + 2] = pixels[i * 4 + 0]; // B <- R
+      rgba[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+function setupAudio() {
+  audioCtx = new AudioContext({ sampleRate: 22050 });
+  const bufferSize = 2048;
+  // Use ScriptProcessorNode (deprecated but widely supported; AudioWorklet needs separate file)
+  audioNode = audioCtx.createScriptProcessor(bufferSize, 0, 1);
+  audioNode.onaudioprocess = (e) => {
+    const output = e.outputBuffer.getChannelData(0);
+    const ptr = wasm.web_generate_audio(output.length);
+    const samples = new Float32Array(memory.buffer, ptr, output.length);
+    output.set(samples);
+  };
+  audioNode.connect(audioCtx.destination);
+}
+
+function setupInput() {
+  document.addEventListener('keydown', (e) => {
+    const mapping = KEY_MAP[e.key];
+    if (mapping) { buttons[mapping[0]] |= mapping[1]; e.preventDefault(); }
+    // Resume audio on first keypress (browser autoplay policy)
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  });
+  document.addEventListener('keyup', (e) => {
+    const mapping = KEY_MAP[e.key];
+    if (mapping) { buttons[mapping[0]] &= ~mapping[1]; e.preventDefault(); }
+  });
+}
+
+function setupDragDrop() {
+  const zone = document.getElementById('drop-zone');
+  const body = document.body;
+
+  body.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over'); });
+  body.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  body.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      file.arrayBuffer().then(buf => loadCart(new Uint8Array(buf)));
+    }
+  });
+}
+
+init();
+</script>
+</body>
+</html>

@@ -1,11 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zlua = @import("zlua");
 const api = @import("api.zig");
 const Memory = @import("memory.zig").Memory;
 const mem_const = @import("memory.zig");
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const is_native = (builtin.os.tag != .freestanding and builtin.os.tag != .wasi);
+const c = if (is_native) @cImport({ @cInclude("SDL3/SDL.h"); }) else struct {};
 pub const sdl = c;
 
 const SAMPLE_RATE = 22050;
@@ -69,7 +69,7 @@ pub const Audio = struct {
     channels: [NUM_CHANNELS]Channel = .{Channel{}} ** NUM_CHANNELS,
     music_state: MusicState = MusicState{},
     memory: *Memory,
-    stream: ?*c.SDL_AudioStream = null,
+    stream: if (is_native) ?*c.SDL_AudioStream else void = if (is_native) null else {},
     noise_seed: u32 = 1,
 
     pub fn init(memory: *Memory) Audio {
@@ -78,8 +78,8 @@ pub const Audio = struct {
         };
     }
 
-    /// Must be called after the Audio struct is at its final address (not moved)
     pub fn openDevice(self: *Audio) void {
+        if (!is_native) return;
         var spec: c.SDL_AudioSpec = .{
             .format = c.SDL_AUDIO_S16,
             .channels = 1,
@@ -98,8 +98,10 @@ pub const Audio = struct {
     }
 
     pub fn deinit(self: *Audio) void {
-        if (self.stream) |s| {
-            c.SDL_DestroyAudioStream(s);
+        if (is_native) {
+            if (self.stream) |s| {
+                c.SDL_DestroyAudioStream(s);
+            }
         }
     }
 
@@ -109,8 +111,9 @@ pub const Audio = struct {
         self.channels = .{Channel{}} ** NUM_CHANNELS;
         self.music_state = MusicState{};
         self.noise_seed = 1;
-        // Flush any buffered samples so old audio doesn't leak through
-        if (self.stream) |s| _ = c.SDL_ClearAudioStream(s);
+        if (is_native) {
+            if (self.stream) |s| _ = c.SDL_ClearAudioStream(s);
+        }
     }
 
     pub fn playSfx(self: *Audio, sfx_id: i32, channel_req: i32, offset: i32) void {
@@ -571,15 +574,21 @@ pub const Audio = struct {
     }
 
     pub fn lockStream(self: *Audio) void {
-        if (self.stream) |s| _ = c.SDL_LockAudioStream(s);
+        if (is_native) {
+            if (self.stream) |s| _ = c.SDL_LockAudioStream(s);
+        }
     }
 
     pub fn unlockStream(self: *Audio) void {
-        if (self.stream) |s| _ = c.SDL_UnlockAudioStream(s);
+        if (is_native) {
+            if (self.stream) |s| _ = c.SDL_UnlockAudioStream(s);
+        }
     }
 };
 
-pub fn audioStreamCallback(userdata: ?*anyopaque, stream: ?*c.SDL_AudioStream, additional_amount: c_int, _: c_int) callconv(.c) void {
+pub const audioStreamCallback = if (is_native) audioStreamCallbackNative else void;
+
+fn audioStreamCallbackNative(userdata: ?*anyopaque, stream: ?*c.SDL_AudioStream, additional_amount: c_int, _: c_int) callconv(.c) void {
     if (userdata == null or stream == null or additional_amount <= 0) return;
     const audio: *Audio = @ptrCast(@alignCast(userdata));
     const sample_bytes = @sizeOf(i16);
