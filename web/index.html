@@ -196,6 +196,8 @@ function showError(msg) {
 }
 
 let lastFrameTime = 0;
+let indicatorEnd = 0; // timestamp when indicator should stop
+
 function frame(timestamp) {
   if (!running) return;
   const fps = wasm.web_get_fps();
@@ -216,6 +218,27 @@ function frame(timestamp) {
       rgba[i * 4 + 2] = px[i * 4 + 0]; // B
       rgba[i * 4 + 3] = 255;
     }
+
+    // Draw save/load indicator: 2px border cycling through colors
+    if (timestamp < indicatorEnd) {
+      const PALETTE = [
+        [0,0,0],[29,43,83],[126,37,83],[0,135,81],
+        [171,82,54],[95,87,79],[194,195,199],[255,241,232],
+        [255,0,77],[255,163,0],[255,236,39],[0,228,54],
+        [41,173,255],[131,118,156],[255,119,168],[255,204,170]
+      ];
+      const ci = Math.floor((indicatorEnd - timestamp) / 50) % 16;
+      const [cr, cg, cb] = PALETTE[ci];
+      for (let y = 0; y < 128; y++) {
+        for (let x = 0; x < 128; x++) {
+          if (x < 2 || x >= 126 || y < 2 || y >= 126) {
+            const j = (y * 128 + x) * 4;
+            rgba[j] = cr; rgba[j+1] = cg; rgba[j+2] = cb; rgba[j+3] = 255;
+          }
+        }
+      }
+    }
+
     ctx.putImageData(imageData, 0, 0);
   }
   requestAnimationFrame(frame);
@@ -268,8 +291,8 @@ function setupInput() {
     const m = KEY_MAP[e.key];
     if (m) { buttons[m[0]] |= m[1]; e.preventDefault(); }
     // Save/load state
-    if (e.key === 'p' || e.key === 'P') { saveStateToStorage(); e.preventDefault(); }
-    if (e.key === 'l' || e.key === 'L') { loadStateFromStorage(); e.preventDefault(); }
+    if (e.key === 'p' || e.key === 'P') { saveStateToStorage(); indicatorEnd = performance.now() + 2000; e.preventDefault(); }
+    if (e.key === 'l' || e.key === 'L') { loadStateFromStorage(); indicatorEnd = performance.now() + 2000; e.preventDefault(); }
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   });
   document.addEventListener('keyup', (e) => {
