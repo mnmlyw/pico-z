@@ -522,7 +522,11 @@ fn tryCompoundAssign(allocator: std.mem.Allocator, line: []const u8, pos: usize,
 
     const rhs_start = pos + op_len;
     const rhs_info = extractRHS(line, rhs_start);
-    const rhs = rhs_info.rhs;
+    const raw_rhs = rhs_info.rhs;
+    // Preprocess RHS so operators like %src>>>4 get transformed
+    const processed_rhs = if (raw_rhs.len > 0) (preprocess(allocator, raw_rhs) catch null) else null;
+    defer if (processed_rhs) |p| allocator.free(p);
+    const rhs = if (processed_rhs) |p| std.mem.trimRight(u8, p, "\n") else raw_rhs;
 
     // If RHS is empty (continues on next line), only handle simple op cases
     // where we can emit "lhs = lhs op" and let the next line continue the expression
@@ -679,10 +683,11 @@ fn expandShortIfs(allocator: std.mem.Allocator, line: []const u8) !?[]const u8 {
                     var after = k + 1;
                     while (after < line.len and (line[after] == ' ' or line[after] == '\t')) : (after += 1) {}
 
-                    const sep_len = kw.separator.len;
-                    const has_sep = after + sep_len <= line.len and
-                        std.mem.eql(u8, line[after .. after + sep_len], kw.separator) and
-                        (after + sep_len >= line.len or (!std.ascii.isAlphanumeric(line[after + sep_len]) and line[after + sep_len] != '_'));
+                    // Check if separator keyword appears anywhere after the closing paren.
+                    // If it does, this is a normal if/while, not a short form.
+                    // e.g. `if (self.timer or 0) < 5 then` has `then` after `)`.
+                    const rest_after_paren = line[k + 1 ..];
+                    const has_sep = hasSeparatorKeyword(rest_after_paren, kw.separator);
 
                     if (!has_sep) {
                         // Short form detected! Check if body is non-empty
@@ -864,6 +869,28 @@ fn extractRHS(line: []const u8, start: usize) RHSResult {
     return .{ .rhs = line[rhs_start..end], .end = i };
 }
 
+/// Check if a separator keyword (then/do) appears as a whole word in the text,
+/// outside of strings. Used to distinguish short-if from normal if.
+fn hasSeparatorKeyword(text: []const u8, sep: []const u8) bool {
+    var j: usize = 0;
+    var in_str: u8 = 0;
+    while (j < text.len) : (j += 1) {
+        if (in_str != 0) {
+            if (text[j] == '\\' and j + 1 < text.len) { j += 1; continue; }
+            if (text[j] == in_str) in_str = 0;
+            continue;
+        }
+        if (text[j] == '"' or text[j] == '\'') { in_str = text[j]; continue; }
+        if (text[j] == '-' and j + 1 < text.len and text[j + 1] == '-') break; // comment
+        if (j + sep.len <= text.len and std.mem.eql(u8, text[j .. j + sep.len], sep)) {
+            const before_ok = (j == 0 or (!std.ascii.isAlphanumeric(text[j - 1]) and text[j - 1] != '_'));
+            const after_ok = (j + sep.len >= text.len or (!std.ascii.isAlphanumeric(text[j + sep.len]) and text[j + sep.len] != '_'));
+            if (before_ok and after_ok) return true;
+        }
+    }
+    return false;
+}
+
 fn isStatementKeyword(line: []const u8, pos: usize) bool {
     const keywords = [_][]const u8{
         "return", "end", "if", "then", "else", "elseif",
@@ -910,10 +937,21 @@ fn extractLHS(output: []const u8) LHSResult {
     // Skip trailing whitespace (between LHS and operator)
     while (end > 0 and (output[end - 1] == ' ' or output[end - 1] == '\t')) : (end -= 1) {}
     var start = end;
+    // Walk backward over identifiers, indexing, and function calls (matched parens)
     while (start > 0) {
         const ch = output[start - 1];
         if (std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == ']' or ch == '[') {
             start -= 1;
+        } else if (ch == ')') {
+            // Walk backward to matching '('
+            var depth: i32 = 1;
+            start -= 1;
+            while (start > 0 and depth > 0) {
+                start -= 1;
+                if (output[start] == ')') depth += 1;
+                if (output[start] == '(') depth -= 1;
+            }
+            // Continue backward to include function name before '('
         } else {
             break;
         }

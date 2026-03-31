@@ -1456,6 +1456,14 @@ test "preprocessor: peek shortcuts" {
     }
 }
 
+test "preprocessor: peek2 with lshr" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "a = (%src>>>16-b)\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "peek2(") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "lshr(") != null);
+}
+
 test "preprocessor: binary literals" {
     const alloc = testing.allocator;
     const result = try preprocessor.preprocess(alloc, "a = 0b1010\n");
