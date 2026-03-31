@@ -6,139 +6,242 @@
 <title>PICO-Z Web</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-  #screen { image-rendering: pixelated; image-rendering: crisp-edges; width: 512px; height: 512px; }
-  #drop-zone { position: fixed; inset: 0; display: flex; justify-content: center; align-items: center;
-    color: #fff; font-family: monospace; font-size: 14px; }
-  #drop-zone.has-cart { display: none; }
-  .drag-over { background: rgba(41, 173, 255, 0.1); border: 2px dashed #29ADFF; }
+  body { background: #000; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; min-height: 100vh;
+    font-family: -apple-system, sans-serif; color: #fff; }
+  #screen { image-rendering: pixelated; image-rendering: crisp-edges;
+    width: 512px; height: 512px; display: none; }
+  #loader { text-align: center; }
+  #loader.hidden { display: none; }
+  #loader p { color: #888; font-size: 14px; margin-bottom: 20px; }
+  #open-btn { background: #29ADFF; color: #000; border: none; padding: 10px 28px;
+    border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  #open-btn:hover { opacity: 0.85; }
+  #file-input { display: none; }
+  #error { color: #f55; font-size: 13px; margin-top: 12px; display: none; }
 </style>
 </head>
 <body>
-<div id="drop-zone">Drop a .p8 or .p8.png cart here</div>
-<canvas id="screen" width="128" height="128" style="display:none"></canvas>
+<div id="loader">
+  <p>PICO-Z Web Player</p>
+  <button id="open-btn">Open Cart</button>
+  <input type="file" id="file-input" accept=".p8,.png,.p8.png">
+  <div id="error"></div>
+</div>
+<canvas id="screen" width="128" height="128"></canvas>
 
 <script>
-let wasm, memory, pixelBufPtr, ctx, imageData, audioCtx, audioNode;
-let buttons = [0, 0]; // player 0, player 1
+let wasm, ctx, imageData, audioCtx, audioNode;
+function getMemBuf() { return wasm.memory.buffer; }
+const mem = { get buffer() { return wasm ? wasm.memory.buffer : new ArrayBuffer(0); } };
+let buttons = [0, 0];
 let running = false;
-let targetFps = 30;
 
-// Key mappings: key -> [player, bit]
 const KEY_MAP = {
   ArrowLeft:  [0, 0x01], ArrowRight: [0, 0x02], ArrowUp: [0, 0x04], ArrowDown: [0, 0x08],
-  z: [0, 0x10], c: [0, 0x10], n: [0, 0x10], // O button
-  x: [0, 0x20], v: [0, 0x20], m: [0, 0x20], // X button
-  s: [1, 0x01], f: [1, 0x02], e: [1, 0x04], d: [1, 0x08], // P1 dpad
-  Tab: [1, 0x10], q: [1, 0x10], w: [1, 0x20], // P1 buttons
+  z: [0, 0x10], c: [0, 0x10], n: [0, 0x10],
+  x: [0, 0x20], v: [0, 0x20], m: [0, 0x20],
+  s: [1, 0x01], f: [1, 0x02], e: [1, 0x04], d: [1, 0x08],
+  Tab: [1, 0x10], q: [1, 0x10], w: [1, 0x20],
 };
 
+// LLVM WASM SjLj runtime — implements setjmp/longjmp via JS exceptions.
+// LLVM's -wasm-enable-sjlj pass transforms C setjmp/longjmp into calls to
+// these runtime functions. longjmp throws a JS exception; setjmp sites use
+// try/catch blocks (inserted by LLVM) to catch them.
+function sjljRuntime() {
+  // setjmp table: maps jmp_buf address -> {label, table}
+  const setjmpTable = new Map();
+  let nextLabel = 1;
+
+  return {
+    __wasm_setjmp: (buf, label, table) => {
+      // Store setjmp state: the label ID tells LLVM which setjmp site was hit
+      const view = new DataView(mem.buffer);
+      view.setUint32(buf, nextLabel, true);
+      setjmpTable.set(buf, { label: nextLabel, table });
+      nextLabel++;
+    },
+    __wasm_longjmp: (buf, val) => {
+      // Throw a special exception that will be caught by LLVM's generated catch blocks
+      throw { __wasm_sjlj: true, buf, val: val || 1 };
+    },
+    __wasm_setjmp_test: (buf, table) => {
+      // Called after catching an exception to check if it matches this setjmp site
+      const entry = setjmpTable.get(buf);
+      if (!entry) return 0;
+      return entry.label;
+    },
+  };
+}
+
+// Minimal WASI stubs — Lua's C code links against WASI but we only need
+// fd_write (for printh/debug output) and clock_time_get (for time).
+function wasiStubs() {
+  return {
+    environ_sizes_get: (count_ptr, size_ptr) => {
+      const view = new DataView(mem.buffer);
+      view.setUint32(count_ptr, 0, true);
+      view.setUint32(size_ptr, 0, true);
+      return 0;
+    },
+    environ_get: () => 0,
+    clock_time_get: (id, precision, out_ptr) => {
+      const view = new DataView(mem.buffer);
+      const ns = BigInt(Math.floor(performance.now() * 1e6));
+      view.setBigUint64(out_ptr, ns, true);
+      return 0;
+    },
+    fd_write: (fd, iovs_ptr, iovs_len, nwritten_ptr) => {
+      const view = new DataView(mem.buffer);
+      let written = 0;
+      let text = '';
+      for (let i = 0; i < iovs_len; i++) {
+        const ptr = view.getUint32(iovs_ptr + i * 8, true);
+        const len = view.getUint32(iovs_ptr + i * 8 + 4, true);
+        text += new TextDecoder().decode(new Uint8Array(mem.buffer, ptr, len));
+        written += len;
+      }
+      if (fd === 1 || fd === 2) console.log(text.trimEnd());
+      view.setUint32(nwritten_ptr, written, true);
+      return 0;
+    },
+    fd_read: () => 8, // EBADF
+    fd_close: () => 0,
+    fd_seek: () => 8,
+    fd_fdstat_get: (fd, buf) => {
+      const view = new DataView(mem.buffer);
+      view.setUint8(buf, 4); // regular file
+      view.setUint16(buf + 2, 0, true);
+      view.setBigUint64(buf + 8, 0n, true);
+      view.setBigUint64(buf + 16, 0n, true);
+      return 0;
+    },
+    fd_fdstat_set_flags: () => 0,
+    fd_filestat_get: () => 8,
+    fd_prestat_get: () => 8,
+    fd_prestat_dir_name: () => 8,
+    fd_pwrite: () => 8,
+    fd_renumber: () => 8,
+    path_open: () => 44, // ENOENT
+    proc_exit: (code) => { console.log('proc_exit:', code); },
+  };
+}
+
+function openFile() {
+  document.getElementById('file-input').click();
+}
+
 async function init() {
-  const result = await WebAssembly.instantiateStreaming(fetch('pico-z.wasm'), {
-    env: {},
+  // Wire UI immediately so button works even if WASM fails
+  document.getElementById('open-btn').addEventListener('click', openFile);
+  document.getElementById('file-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) file.arrayBuffer().then(buf => loadCart(new Uint8Array(buf)));
   });
-  wasm = result.instance.exports;
-  memory = wasm.memory;
-
-  const canvas = document.getElementById('screen');
-  ctx = canvas.getContext('2d');
-  imageData = ctx.createImageData(128, 128);
-
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('dragenter', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const file = e.dataTransfer.files[0];
+    if (file) file.arrayBuffer().then(buf => loadCart(new Uint8Array(buf)));
+  });
   setupInput();
-  setupDragDrop();
+
+  // Load WASM
+  try {
+    const response = await fetch('pico-z.wasm');
+    const result = await WebAssembly.instantiateStreaming(response, {
+      wasi_snapshot_preview1: wasiStubs(),
+      env: sjljRuntime(),
+    });
+    wasm = result.instance.exports;
+    const canvas = document.getElementById('screen');
+    ctx = canvas.getContext('2d');
+    imageData = ctx.createImageData(128, 128);
+  } catch(e) {
+    showError('WASM load failed: ' + e.message);
+    console.error(e);
+  }
 }
 
 function loadCart(bytes) {
+  const err_el = document.getElementById('error');
+  err_el.style.display = 'none';
+
   const ptr = wasm.web_alloc(bytes.length);
-  if (!ptr) { console.error('Failed to allocate memory'); return; }
+  if (!ptr) { showError('Failed to allocate memory'); return; }
 
-  const wasmBuf = new Uint8Array(memory.buffer, ptr, bytes.length);
-  wasmBuf.set(bytes);
-
+  new Uint8Array(mem.buffer, ptr, bytes.length).set(bytes);
   const err = wasm.web_init(ptr, bytes.length);
   wasm.web_free(ptr, bytes.length);
 
-  if (err !== 0) { console.error('Failed to load cart'); return; }
+  if (err !== 0) { showError('Failed to load cart'); return; }
 
+  document.getElementById('loader').classList.add('hidden');
   document.getElementById('screen').style.display = 'block';
-  document.getElementById('drop-zone').classList.add('has-cart');
+  document.getElementById('screen').focus();
 
   if (!audioCtx) setupAudio();
   running = true;
+  lastFrameTime = 0;
   requestAnimationFrame(frame);
+}
+
+function showError(msg) {
+  const el = document.getElementById('error');
+  el.textContent = msg;
+  el.style.display = 'block';
 }
 
 let lastFrameTime = 0;
 function frame(timestamp) {
   if (!running) return;
+  const fps = wasm.web_get_fps();
+  const interval = 1000 / fps;
 
-  targetFps = wasm.web_get_fps();
-  const frameInterval = 1000 / targetFps;
-
-  if (timestamp - lastFrameTime >= frameInterval - 1) {
+  if (timestamp - lastFrameTime >= interval - 1) {
     lastFrameTime = timestamp;
-
     wasm.web_set_buttons(0, buttons[0]);
     wasm.web_set_buttons(1, buttons[1]);
     wasm.web_update();
 
-    // Read pixel buffer and draw to canvas
     const bufPtr = wasm.web_get_pixel_buffer();
-    const pixels = new Uint8Array(memory.buffer, bufPtr, 128 * 128 * 4);
-    // ARGB -> RGBA
+    const px = new Uint8Array(mem.buffer, bufPtr, 128 * 128 * 4);
     const rgba = imageData.data;
     for (let i = 0; i < 128 * 128; i++) {
-      rgba[i * 4 + 0] = pixels[i * 4 + 2]; // R <- B (ARGB byte order in LE)
-      rgba[i * 4 + 1] = pixels[i * 4 + 1]; // G <- G
-      rgba[i * 4 + 2] = pixels[i * 4 + 0]; // B <- R
+      rgba[i * 4 + 0] = px[i * 4 + 2]; // R
+      rgba[i * 4 + 1] = px[i * 4 + 1]; // G
+      rgba[i * 4 + 2] = px[i * 4 + 0]; // B
       rgba[i * 4 + 3] = 255;
     }
     ctx.putImageData(imageData, 0, 0);
   }
-
   requestAnimationFrame(frame);
 }
 
 function setupAudio() {
   audioCtx = new AudioContext({ sampleRate: 22050 });
-  const bufferSize = 2048;
-  // Use ScriptProcessorNode (deprecated but widely supported; AudioWorklet needs separate file)
-  audioNode = audioCtx.createScriptProcessor(bufferSize, 0, 1);
-  audioNode.onaudioprocess = (e) => {
-    const output = e.outputBuffer.getChannelData(0);
-    const ptr = wasm.web_generate_audio(output.length);
-    const samples = new Float32Array(memory.buffer, ptr, output.length);
-    output.set(samples);
+  const node = audioCtx.createScriptProcessor(2048, 0, 1);
+  node.onaudioprocess = (e) => {
+    const out = e.outputBuffer.getChannelData(0);
+    const ptr = wasm.web_generate_audio(out.length);
+    out.set(new Float32Array(mem.buffer, ptr, out.length));
   };
-  audioNode.connect(audioCtx.destination);
+  node.connect(audioCtx.destination);
+  audioNode = node;
 }
 
 function setupInput() {
   document.addEventListener('keydown', (e) => {
-    const mapping = KEY_MAP[e.key];
-    if (mapping) { buttons[mapping[0]] |= mapping[1]; e.preventDefault(); }
-    // Resume audio on first keypress (browser autoplay policy)
+    const m = KEY_MAP[e.key];
+    if (m) { buttons[m[0]] |= m[1]; e.preventDefault(); }
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   });
   document.addEventListener('keyup', (e) => {
-    const mapping = KEY_MAP[e.key];
-    if (mapping) { buttons[mapping[0]] &= ~mapping[1]; e.preventDefault(); }
-  });
-}
-
-function setupDragDrop() {
-  const zone = document.getElementById('drop-zone');
-  const body = document.body;
-
-  body.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over'); });
-  body.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-  body.addEventListener('drop', (e) => {
-    e.preventDefault();
-    zone.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      file.arrayBuffer().then(buf => loadCart(new Uint8Array(buf)));
-    }
+    const m = KEY_MAP[e.key];
+    if (m) { buttons[m[0]] &= ~m[1]; e.preventDefault(); }
   });
 }
 
