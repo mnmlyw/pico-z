@@ -24,6 +24,7 @@ pub const LuaEngine = struct {
         sandboxGlobals(lua);
 
         api.registerAll(lua, pico);
+        setupEnvFallback(lua);
 
         return LuaEngine{
             .lua = lua,
@@ -162,6 +163,37 @@ pub const LuaEngine = struct {
         }
     }
 
+    /// Emulate z8lua's _ENV fallback: when a table without a metatable is
+    /// returned by all()/foreach()/pairs(), set __index=_G so global lookups
+    /// (like circ, circfill) still work when the table is used as _ENV.
+    fn setupEnvFallback(lua: *zlua.Lua) void {
+        const script =
+            \\do
+            \\  local mt={__index=_G}
+            \\  local rawall=all
+            \\  local rawforeach=foreach
+            \\  local sm=setmetatable
+            \\  local gm=getmetatable
+            \\  local tp=type
+            \\  local function wrap(v)
+            \\    if tp(v)=="table" and not gm(v) then sm(v,mt) end
+            \\    return v
+            \\  end
+            \\  all=function(t)
+            \\    local it=rawall(t)
+            \\    return function() return wrap(it()) end
+            \\  end
+            \\  foreach=function(t,f)
+            \\    return rawforeach(t,function(v) return f(wrap(v)) end)
+            \\  end
+            \\end
+        ;
+        lua.loadBuffer(script, "__pz_env", .text) catch return;
+        lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+            lua.pop(1);
+        };
+    }
+
     /// Destroy and recreate the Lua VM without executing any cart source.
     /// Used before loading a new cart to get a clean VM state.
     pub fn resetVM(self: *LuaEngine) !void {
@@ -171,6 +203,7 @@ pub const LuaEngine = struct {
         self.lua.openLibs();
         sandboxGlobals(self.lua);
         api.registerAll(self.lua, self.pico);
+        setupEnvFallback(self.lua);
 
         self.had_error = false;
         self.error_len = 0;

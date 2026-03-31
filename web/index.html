@@ -245,12 +245,21 @@ function frame(timestamp) {
 }
 
 function setupAudio() {
-  audioCtx = new AudioContext({ sampleRate: 22050 });
+  audioCtx = new AudioContext();
+  const actualRate = audioCtx.sampleRate; // browser's native rate (e.g. 48000)
+  const synthRate = 22050; // our synth's sample rate
+  const ratio = synthRate / actualRate;
+
   const node = audioCtx.createScriptProcessor(2048, 0, 1);
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0);
-    const ptr = wasm.web_generate_audio(out.length);
-    out.set(new Float32Array(mem.buffer, ptr, out.length));
+    // Generate the right number of synth samples, then resample
+    const needed = Math.ceil(out.length * ratio);
+    const ptr = wasm.web_generate_audio(needed);
+    const src = new Float32Array(mem.buffer, ptr, needed);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = src[Math.min(Math.floor(i * ratio), needed - 1)];
+    }
   };
   node.connect(audioCtx.destination);
   audioNode = node;
