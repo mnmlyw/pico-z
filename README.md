@@ -4,13 +4,17 @@ A PICO-8 emulator with save states. Plays `.p8` and `.p8.png` carts on macOS, Wi
 
 Built with Zig, ziglua (Lua 5.2), and SDL3. Web version compiles to WASM (356KB, no Emscripten).
 
+Tested with [Celeste Classic](https://www.lexaloffle.com/bbs/?tid=2145) and other community carts.
+
 ![Demo](res/demo.gif)
 
-> **Note:** PICO-Z is a player/emulator only — it does not include PICO-8's editor, splore, or game creation tools. You still need [PICO-8](https://www.lexaloffle.com/pico-8.php) to make games.
+> **Note:** PICO-Z is a player/emulator only — it does not include PICO-8's editor, splore, or game creation tools. To make games, get [PICO-8](https://www.lexaloffle.com/pico-8.php) from Lexaloffle.
 
 ## Try It
 
 **[Play in Browser](https://mnmlyw.github.io/pico-z/play/)** — open any `.p8` or `.p8.png` cart directly in your browser. No install needed.
+
+To get a cart to try, download [Celeste Classic](https://www.lexaloffle.com/bbs/?tid=2145) or browse the [PICO-8 BBS](https://www.lexaloffle.com/bbs/?cat=7).
 
 ## Build & Run
 
@@ -32,7 +36,7 @@ zig build web                  # build WASM module to web/
 - **Memory** — flat 65536-byte RAM matching PICO-8 layout (sprites, map, SFX, draw state, screen)
 - **Sandbox** — Lua stdlib restricted to match PICO-8 (no io, os, debug, require, etc.)
 - **Multi-cart** — `load()` to switch cartridges at runtime, `run()` to restart
-- **Quick Save/Load** — press **P** to save state, **L** to load; saves full game state (RAM, audio, Lua globals) to `<cart>.sav` — not available in standard PICO-8
+- **Quick Save/Load** — press **P** to save state, **L** to load; saves full game state (RAM, audio, Lua globals) — not available in standard PICO-8
 - **Cart Reload** — press **R** to reload the cart from disk without restarting the emulator
 - **Drag and drop** — drop `.p8` or `.p8.png` files onto the window to load
 
@@ -52,3 +56,7 @@ zig build web                  # build WASM module to web/
 | L | Load state |
 | R | Reload cart from disk |
 | ESC | Quit |
+
+## Credits
+
+PICO-Z is not affiliated with [Lexaloffle](https://www.lexaloffle.com/) or [PICO-8](https://www.lexaloffle.com/pico-8.php). PICO-8 is created by Joseph White.
