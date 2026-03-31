@@ -12,8 +12,11 @@ const getPico = api_mod.getPico;
 fn toFixed(v: f64) i32 {
     const scaled = v * 65536.0;
     if (scaled != scaled) return 0; // NaN
-    if (scaled >= 2147483647.0) return 2147483647;
-    if (scaled <= -2147483648.0) return -2147483648;
+    // Wrap on overflow (matching PICO-8's fixed-point behavior) instead of clamping
+    if (scaled > 2147483647.0 or scaled < -2147483648.0) {
+        const wide: i64 = if (scaled >= 9223372036854775807.0 or scaled <= -9223372036854775808.0) 0 else @intFromFloat(scaled);
+        return @truncate(wide);
+    }
     return @intFromFloat(scaled);
 }
 
