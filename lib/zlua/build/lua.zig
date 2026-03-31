@@ -84,6 +84,10 @@ pub fn configure(
         // WASI emulation flags for Lua's C code
         if (is_wasi) "-D_WASI_EMULATED_PROCESS_CLOCKS" else "",
         if (is_wasi) "-D_WASI_EMULATED_SIGNAL" else "",
+        // For WASM: enable LLVM's SjLj lowering pass which transforms
+        // setjmp/longjmp into WASM exception handling instructions
+        if (is_wasi) "-mllvm" else "",
+        if (is_wasi) "-wasm-enable-sjlj" else "",
     };
 
     if (is_wasi) {
