@@ -1,6 +1,8 @@
 PICO-Z — PICO-8 cartridge runtime
 
-Usage:
+Web player: https://mnmlyw.github.io/pico-z/play/
+
+Desktop usage:
   pico-z <cart>.p8
   pico-z <cart>.p8.png
 

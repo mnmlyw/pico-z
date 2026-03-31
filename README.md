@@ -1,20 +1,25 @@
 # PICO-Z
 
-A PICO-8 emulator with save states. Plays `.p8` and `.p8.png` carts on macOS, Windows, and Linux.
+A PICO-8 emulator with save states. Plays `.p8` and `.p8.png` carts on macOS, Windows, Linux, and [in the browser](https://mnmlyw.github.io/pico-z/play/).
 
-Built with Zig, ziglua (Lua 5.2), and SDL3.
+Built with Zig, ziglua (Lua 5.2), and SDL3. Web version compiles to WASM (356KB, no Emscripten).
 
 ![Demo](res/demo.gif)
 
 > **Note:** PICO-Z is a player/emulator only — it does not include PICO-8's editor, splore, or game creation tools. You still need [PICO-8](https://www.lexaloffle.com/pico-8.php) to make games.
+
+## Try It
+
+**[Play in Browser](https://mnmlyw.github.io/pico-z/play/)** — open any `.p8` or `.p8.png` cart directly in your browser. No install needed.
 
 ## Build & Run
 
 Requires Zig 0.15+.
 
 ```bash
-zig build                      # build only
+zig build                      # build native app
 zig build run -- <cart>        # build and run a .p8 or .p8.png cart
+zig build web                  # build WASM module to web/
 ```
 
 ## Features
@@ -33,7 +38,8 @@ zig build run -- <cart>        # build and run a .p8 or .p8.png cart
 
 ## Downloads
 
-Pre-built binaries for macOS, Windows, and Linux are available on the [Releases](../../releases) page.
+- **[Web Player](https://mnmlyw.github.io/pico-z/play/)** — runs in any modern browser
+- **Desktop** — pre-built binaries for macOS, Windows, and Linux on the [Releases](../../releases) page
 
 ## Controls
 
