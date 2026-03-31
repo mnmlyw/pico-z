@@ -20,6 +20,14 @@ pub fn loadP8File(allocator: std.mem.Allocator, path: []const u8, memory: *Memor
     return parseP8(allocator, content, memory);
 }
 
+pub fn loadP8Bytes(allocator: std.mem.Allocator, content: []const u8, memory: *Memory) !Cart {
+    return parseP8(allocator, content, memory);
+}
+
+pub fn loadP8PngBytes(allocator: std.mem.Allocator, data: []const u8, memory: *Memory) !Cart {
+    return parseP8Png(allocator, data, memory);
+}
+
 fn parseP8(allocator: std.mem.Allocator, content: []const u8, memory: *Memory) !Cart {
     var lua_lines: std.ArrayList(u8) = .empty;
     errdefer lua_lines.deinit(allocator);
