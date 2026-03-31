@@ -65,15 +65,21 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
     });
     web_mod.addImport("zlua", zlua_wasm.module("zlua"));
-    // WASI emulation libs for Lua's C code (clock, signal)
+    // WASI emulation libs (setjmp/longjmp, signal, clock)
     web_mod.linkSystemLibrary("wasi-emulated-process-clocks", .{});
     web_mod.linkSystemLibrary("wasi-emulated-signal", .{});
+    // Stubs for Lua IO/OS libraries excluded from WASM build
+    web_mod.addIncludePath(zlua_wasm.artifact("lua").getEmittedIncludeTree());
+    web_mod.addCSourceFile(.{ .file = b.path("src/wasm_stubs.c") });
     const web_lib = b.addExecutable(.{
         .name = "pico-z",
         .root_module = web_mod,
     });
     web_lib.entry = .disabled;
     web_lib.rdynamic = true;
+    // Ensure WASI emulation libs are linked at the exe level
+    web_lib.root_module.linkSystemLibrary("wasi-emulated-process-clocks", .{});
+    web_lib.root_module.linkSystemLibrary("wasi-emulated-signal", .{});
     const web_install = b.addInstallArtifact(web_lib, .{
         .dest_dir = .{ .override = .{ .custom = "../web" } },
         .dest_sub_path = "pico-z.wasm",
