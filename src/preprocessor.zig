@@ -1031,8 +1031,9 @@ fn tryBitwiseOp(allocator: std.mem.Allocator, line: []const u8, pos: usize, op_l
     @memcpy(lhs_buf[0..lhs_result.lhs.len], lhs_result.lhs);
     const lhs = lhs_buf[0..lhs_result.lhs.len];
 
-    // Extract RHS after the operator
-    const rhs_info = extractSimpleExpr(line, pos + op_len);
+    // Extract RHS after the operator — use full arithmetic expression
+    // since bitwise ops have lower precedence than +, -, *, / in PICO-8
+    const rhs_info = extractBitwiseRHS(line, pos + op_len);
     if (rhs_info.expr.len == 0) return null;
 
     // Remove LHS from output
@@ -1046,6 +1047,47 @@ fn tryBitwiseOp(allocator: std.mem.Allocator, line: []const u8, pos: usize, op_l
     out.append(allocator, ')') catch return null;
 
     return rhs_info.end;
+}
+
+/// Extract RHS for bitwise operators. Bitwise ops have lower precedence than
+/// arithmetic, so the RHS includes +, -, *, / expressions.
+/// Stops at bitwise operators, commas, semicolons, and statement keywords.
+fn extractBitwiseRHS(line: []const u8, start: usize) struct { expr: []const u8, end: usize } {
+    var i = start;
+    while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
+    const expr_start = i;
+    var depth: i32 = 0;
+    var in_str: u8 = 0;
+    while (i < line.len) {
+        const ch = line[i];
+        if (in_str != 0) {
+            if (ch == '\\') { i += 1; if (i < line.len) i += 1; continue; }
+            if (ch == in_str) in_str = 0;
+            i += 1;
+            continue;
+        }
+        if (ch == '"' or ch == '\'') { in_str = ch; i += 1; continue; }
+        if (ch == '(' or ch == '[') { depth += 1; i += 1; continue; }
+        if (ch == ')' or ch == ']') {
+            if (depth > 0) { depth -= 1; i += 1; continue; }
+            break;
+        }
+        if (depth == 0) {
+            // Stop at bitwise operators, delimiters, and comparison ops
+            if (ch == ',' or ch == ';' or ch == ' ' or ch == '\t' or
+                ch == '>' or ch == '<' or ch == '=' or ch == '~' or
+                ch == '&' or ch == '|' or ch == '}' or ch == '{')
+                break;
+            // Stop at ^^ but not ^
+            if (ch == '^' and i + 1 < line.len and line[i + 1] == '^') break;
+            if (std.ascii.isAlphabetic(ch) and isStatementKeyword(line, i)) break;
+        }
+        i += 1;
+    }
+    // Trim trailing whitespace
+    var end = i;
+    while (end > expr_start and (line[end - 1] == ' ' or line[end - 1] == '\t')) : (end -= 1) {}
+    return .{ .expr = line[expr_start..end], .end = i };
 }
 
 /// Extract a simple expression for RHS of \ or peek shortcut.
