@@ -9,7 +9,7 @@ const LuaEngine = @import("lua_engine.zig").LuaEngine;
 const fs_atomic = @import("fs_atomic.zig");
 
 const MAGIC = [4]u8{ 'P', 'Z', 'S', 'V' };
-const VERSION: u8 = 6;
+const VERSION: u8 = 7;
 
 /// Byte buffer backed by unmanaged ArrayList
 pub const ByteBuf = std.ArrayList(u8);
@@ -354,28 +354,11 @@ fn readInputState(cursor: *ReadCursor, input: *input_mod.Input) !void {
 //
 // The serializer generates Lua code that restores globals when executed.
 // Key features:
-// - Tables with function members use field-by-field updates (preserves functions)
-// - Nested table references to known globals emit the global name (preserves references)
-// - Functions are skipped entirely (re-created by reinit cart source execution)
-
-const lua_fixup =
-    \\if type(init_object)=="function" and type(objects)=="table" then
-    \\  local saved={}
-    \\  for i=1,#objects do saved[i]=objects[i] end
-    \\  objects={}
-    \\  for i=1,#saved do
-    \\    local o=saved[i]
-    \\    if o.type then
-    \\      local n=init_object(o.type,o.x or 0,o.y or 0)
-    \\      if n then
-    \\        for k,v in pairs(o) do
-    \\          if type(v)~="function" then n[k]=v end
-    \\        end
-    \\      end
-    \\    end
-    \\  end
-    \\end
-;
+// - Function values serialize as path references to their global location
+//   (e.g., types[1].update), resolved after reinit + _init()
+// - Tables with metatables that are known globals get setmetatable() wrappers
+// - Nested table references to known globals emit the global name
+// - Anonymous closures not reachable from globals serialize as "nil"
 
 const lua_serializer =
     \\local _sk={_G=1,_VERSION=1,coroutine=1,debug=1,io=1,math=1,os=1,
@@ -403,6 +386,44 @@ const lua_serializer =
     \\for k,v in pairs(_G) do
     \\  if type(k)=="string" and type(v)=="table" and not _sk[k] then
     \\    _gn[v]=k
+    \\    for k2,v2 in pairs(v) do
+    \\      if type(k2)=="string" and type(v2)=="table" and not _gn[v2] then
+    \\        _gn[v2]=k.."."..k2
+    \\      end
+    \\    end
+    \\  end
+    \\end
+    \\local _fn={}
+    \\for k,v in pairs(_G) do
+    \\  if type(k)=="string" and not _sk[k] then
+    \\    if type(v)=="function" then
+    \\      _fn[v]=k
+    \\    elseif type(v)=="table" then
+    \\      for k2,v2 in pairs(v) do
+    \\        if type(v2)=="function" and not _fn[v2] then
+    \\          if type(k2)=="string" then _fn[v2]=k.."."..k2
+    \\          elseif type(k2)=="number" then _fn[v2]=k.."["..string.format("%.17g",k2).."]" end
+    \\        end
+    \\      end
+    \\    end
+    \\  end
+    \\end
+    \\for k,v in pairs(_G) do
+    \\  if type(k)=="string" and not _sk[k] and type(v)=="table" then
+    \\    for k2,v2 in pairs(v) do
+    \\      if type(v2)=="table" then
+    \\        for k3,v3 in pairs(v2) do
+    \\          if type(v3)=="function" and not _fn[v3] then
+    \\            local p=k
+    \\            if type(k2)=="string" then p=p.."."..k2
+    \\            elseif type(k2)=="number" then p=p.."["..string.format("%.17g",k2).."]" end
+    \\            if type(k3)=="string" then p=p.."."..k3
+    \\            elseif type(k3)=="number" then p=p.."["..string.format("%.17g",k3).."]" end
+    \\            _fn[v3]=p
+    \\          end
+    \\        end
+    \\      end
+    \\    end
     \\  end
     \\end
     \\local function _s(v,d,seen)
@@ -412,62 +433,45 @@ const lua_serializer =
     \\    else return string.format("%.17g",v) end
     \\  elseif type(v)=="boolean" then return tostring(v)
     \\  elseif type(v)=="string" then return string.format("%q",v)
+    \\  elseif type(v)=="function" then
+    \\    local ref=_fn[v]
+    \\    if ref then return ref else return"nil" end
     \\  elseif type(v)=="table" then
-    \\    if d>0 and _gn[v] then return _gn[v] end
-    \\    if seen[v] then return"nil" end
+    \\    if seen[v] then return _gn[v] or"nil" end
     \\    seen[v]=true
     \\    local p={}
     \\    local n=0
     \\    for i=1,#v do n=i end
-    \\    for i=1,n do
-    \\      if type(v[i])~="function" then p[#p+1]=_s(v[i],d+1,seen)
-    \\      else p[#p+1]="nil" end
-    \\    end
+    \\    for i=1,n do p[#p+1]=_s(v[i],d+1,seen) end
     \\    for k2,v2 in pairs(v) do
-    \\      if type(v2)~="function" then
-    \\        local ia=type(k2)=="number" and k2>=1 and k2<=n and k2==flr(k2)
-    \\        if not ia then
-    \\          if type(k2)=="string" then
-    \\            p[#p+1]=string.format("[%q]=",k2).._s(v2,d+1,seen)
-    \\          elseif type(k2)=="number" then
-    \\            p[#p+1]="["..string.format("%.17g",k2).."]="
-    \\              .._s(v2,d+1,seen)
-    \\          elseif type(k2)=="boolean" then
-    \\            p[#p+1]="["..tostring(k2).."]="
-    \\              .._s(v2,d+1,seen)
-    \\          end
+    \\      local ia=type(k2)=="number" and k2>=1 and k2<=n and k2==flr(k2)
+    \\      if not ia then
+    \\        if type(k2)=="string" then
+    \\          p[#p+1]=string.format("[%q]=",k2).._s(v2,d+1,seen)
+    \\        elseif type(k2)=="number" then
+    \\          p[#p+1]="["..string.format("%.17g",k2).."]="
+    \\            .._s(v2,d+1,seen)
+    \\        elseif type(k2)=="boolean" then
+    \\          p[#p+1]="["..tostring(k2).."]="
+    \\            .._s(v2,d+1,seen)
     \\        end
     \\      end
     \\    end
     \\    seen[v]=nil
-    \\    return"{"..table.concat(p,",").."}"
+    \\    local mt=getmetatable(v)
+    \\    local r="{"..table.concat(p,",").."}"
+    \\    if mt and _gn[mt] then r="setmetatable("..r..",".. _gn[mt]..")" end
+    \\    return r
     \\  else return"nil" end
     \\end
-    \\local _r={}
+    \\local _r={"local function _m(t,d) for k in pairs(t) do t[k]=nil end for k,v in pairs(d) do t[k]=v end local mt=getmetatable(d) if mt then setmetatable(t,mt) end return t end"}
     \\for k,v in pairs(_G) do
     \\  if type(k)=="string" and not _sk[k] and type(v)~="function" then
+    \\    local sv=_s(v,0,{})
     \\    if type(v)=="table" then
-    \\      local hf=false
-    \\      for _,v2 in pairs(v) do
-    \\        if type(v2)=="function" then hf=true break end
-    \\      end
-    \\      if hf then
-    \\        for k2,v2 in pairs(v) do
-    \\          if type(v2)~="function" then
-    \\            local seen={}
-    \\            if type(k2)=="string" then
-    \\              _r[#_r+1]=k..string.format("[%q]=",k2).._s(v2,1,seen)
-    \\            elseif type(k2)=="number" then
-    \\              _r[#_r+1]=k.."["..string.format("%.17g",k2).."]="
-    \\                .._s(v2,1,seen)
-    \\            end
-    \\          end
-    \\        end
-    \\      else
-    \\        _r[#_r+1]=k.."=".._s(v,0,{})
-    \\      end
+    \\      _r[#_r+1]=k.."=type("..k..")=='table' and _m("..k..","..sv..") or "..sv
     \\    else
-    \\      _r[#_r+1]=k.."=".._s(v,0,{})
+    \\      _r[#_r+1]=k.."="..sv
     \\    end
     \\  end
     \\end
@@ -526,20 +530,6 @@ fn deserializeLuaGlobals(cursor: *ReadCursor, lua: *zlua.Lua) !void {
         std.log.warn("load: restore script exec error: {s}", .{err_msg});
         lua.pop(1);
         return error.LuaRestoreExecError;
-    };
-    // Fixup: re-create closure methods on object instances
-    // Many PICO-8 games (Celeste etc.) attach closure methods (move, collide, etc.)
-    // to objects via init_object. These closures can't be serialized, so we
-    // re-create them by calling init_object and copying saved data fields over.
-    lua.loadBuffer(lua_fixup, "__pz_fixup", .text) catch {
-        lua.pop(1);
-        return error.LuaFixupLoadError;
-    };
-    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
-        const err_msg = lua.toString(-1) catch "?";
-        std.log.warn("load: fixup script error: {s}", .{err_msg});
-        lua.pop(1);
-        return error.LuaFixupExecError;
     };
 }
 

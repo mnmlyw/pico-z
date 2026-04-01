@@ -12,7 +12,7 @@ pub const LuaEngine = struct {
     has_update60: bool = false,
     has_draw: bool = false,
     had_error: bool = false,
-    error_msg: [512]u8 = undefined,
+    error_msg: [2048]u8 = undefined,
     error_len: usize = 0,
     allocator: std.mem.Allocator,
     pico: *api.PicoState,
@@ -121,6 +121,20 @@ pub const LuaEngine = struct {
 
     fn captureError(self: *LuaEngine) void {
         self.had_error = true;
+
+        // Try to append traceback for debugging
+        _ = self.lua.getGlobal("__pz_tb") catch {};
+        if (self.lua.isFunction(-1)) {
+            self.lua.pushValue(-2); // push error message
+            self.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+                self.lua.pop(1);
+            };
+            // Replace original error with traceback version
+            self.lua.remove(-2);
+        } else {
+            self.lua.pop(1);
+        }
+
         if (self.lua.toString(-1)) |msg| {
             const len = @min(msg.len, self.error_msg.len);
             @memcpy(self.error_msg[0..len], msg[0..len]);
@@ -143,6 +157,13 @@ pub const LuaEngine = struct {
 
     /// Remove standard Lua libraries/globals that PICO-8 doesn't expose.
     fn sandboxGlobals(lua: *zlua.Lua) void {
+        // Save debug.traceback as __pz_tb before removing debug
+        _ = lua.getGlobal("debug") catch {};
+        const field_type = lua.getField(-1, "traceback");
+        _ = field_type;
+        lua.setGlobal("__pz_tb");
+        lua.pop(1); // pop debug table
+
         const blocked = [_][:0]const u8{
             "io",
             "os",

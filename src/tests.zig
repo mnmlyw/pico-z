@@ -617,6 +617,122 @@ test "rng state round-trips through save state" {
     try testing.expectEqual(expected_next, actual_next);
 }
 
+test "save-state preserves function references in objects" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    defer old_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer old_cwd.setAsCwd() catch unreachable;
+
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    // Type table as standalone global with methods; objects reference them
+    var lua_engine = try initTestLuaEngine(&pico,
+        \\my_type={update=function(self) self.v=self.v+10 end}
+        \\objects={}
+        \\function _init()
+        \\  objects[1]={v=5,update=my_type.update}
+        \\end
+        \\
+    );
+    defer lua_engine.deinit();
+
+    lua_engine.callInit();
+    try runLua(lua_engine.lua, "objects[1].v=42");
+    try save_state.saveState(&pico, &lua_engine, "cart.p8");
+
+    // Mutate state
+    try runLua(lua_engine.lua, "objects[1].v=999");
+    try save_state.loadState(&pico, &lua_engine, "cart.p8");
+
+    // Data restored
+    try testing.expectEqual(@as(f64, 42), try evalLuaNumber(lua_engine.lua, "return objects[1].v"));
+    // Function reference preserved — calling update adds 10
+    try runLua(lua_engine.lua, "objects[1].update(objects[1])");
+    try testing.expectEqual(@as(f64, 52), try evalLuaNumber(lua_engine.lua, "return objects[1].v"));
+}
+
+test "save-state preserves metatables" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    defer old_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer old_cwd.setAsCwd() catch unreachable;
+
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico,
+        \\vec={} vec.__index=vec
+        \\function vec.new(x,y) return setmetatable({x=x,y=y},vec) end
+        \\function vec:len() return sqrt(self.x*self.x+self.y*self.y) end
+        \\obj=nil
+        \\function _init() obj=vec.new(3,4) end
+        \\
+    );
+    defer lua_engine.deinit();
+
+    lua_engine.callInit();
+    try save_state.saveState(&pico, &lua_engine, "cart.p8");
+
+    try runLua(lua_engine.lua, "obj=nil");
+    try save_state.loadState(&pico, &lua_engine, "cart.p8");
+
+    // Metatable preserved — method dispatch works
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return obj:len()"));
+}
+
+test "save-state preserves top-level functions across double save/load" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var old_cwd = try std.fs.cwd().openDir(".", .{});
+    defer old_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer old_cwd.setAsCwd() catch unreachable;
+
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    // Types and functions defined at top level (standard PICO-8 pattern)
+    var lua_engine = try initTestLuaEngine(&pico,
+        \\types={}
+        \\types[1]={move=function(self) self.x=self.x+1 end}
+        \\player={x=0,move=types[1].move}
+        \\
+    );
+    defer lua_engine.deinit();
+
+    try runLua(lua_engine.lua, "player.x=10");
+    try save_state.saveState(&pico, &lua_engine, "cart.p8");
+    try runLua(lua_engine.lua, "player.x=0");
+    try save_state.loadState(&pico, &lua_engine, "cart.p8");
+
+    // First load: data + function preserved
+    try testing.expectEqual(@as(f64, 10), try evalLuaNumber(lua_engine.lua, "return player.x"));
+    try runLua(lua_engine.lua, "player.move(player)");
+    try testing.expectEqual(@as(f64, 11), try evalLuaNumber(lua_engine.lua, "return player.x"));
+
+    // Second save/load cycle
+    try runLua(lua_engine.lua, "player.x=20");
+    try save_state.saveState(&pico, &lua_engine, "cart.p8");
+    try runLua(lua_engine.lua, "player.x=0");
+    try save_state.loadState(&pico, &lua_engine, "cart.p8");
+
+    // Second load: data + function still preserved
+    try testing.expectEqual(@as(f64, 20), try evalLuaNumber(lua_engine.lua, "return player.x"));
+    try runLua(lua_engine.lua, "player.move(player)");
+    try testing.expectEqual(@as(f64, 21), try evalLuaNumber(lua_engine.lua, "return player.x"));
+}
+
 test "cartdata retries after transient attach failure" {
     const old_log_level = std.testing.log_level;
     std.testing.log_level = .err;
