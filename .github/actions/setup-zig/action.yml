@@ -1,0 +1,27 @@
+name: 'Setup Zig'
+description: 'Download and install the Zig compiler (no Node dependency)'
+inputs:
+  version:
+    description: 'Zig version, e.g. "0.15.2"'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Zig
+      shell: bash
+      run: |
+        VERSION="${{ inputs.version }}"
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)    ARCH="x86_64-linux" ;;
+          Linux-ARM64)  ARCH="aarch64-linux" ;;
+          macOS-X64)    ARCH="x86_64-macos" ;;
+          macOS-ARM64)  ARCH="aarch64-macos" ;;
+          Windows-X64)  ARCH="x86_64-windows" ;;
+          *) echo "Unsupported: $RUNNER_OS-$RUNNER_ARCH" && exit 1 ;;
+        esac
+        URL="https://ziglang.org/download/${VERSION}/zig-${ARCH}-${VERSION}.tar.xz"
+        echo "Downloading $URL"
+        curl -sSfL "$URL" | tar -xJ -C "$RUNNER_TEMP"
+        ZIG_DIR="$RUNNER_TEMP/zig-${ARCH}-${VERSION}"
+        echo "$ZIG_DIR" >> "$GITHUB_PATH"
+        echo "Zig $VERSION installed"

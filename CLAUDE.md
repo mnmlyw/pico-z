@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 zig build                      # build native app
 zig build run -- <cart>.p8     # build and run a cart
 zig build test                 # run all tests
-zig build web                  # build WASM module to web/
+zig build -Dweb                # build WASM module to web/
 bash build.sh v0.2.0           # cross-compile release zips to dist/
 ```
 
