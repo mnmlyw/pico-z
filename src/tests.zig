@@ -1973,3 +1973,383 @@ test "flr on negative numbers" {
     try testing.expectEqual(@as(f64, -3), try evalLuaNumber(lua_engine.lua, "return flr(-2.5)"));
     try testing.expectEqual(@as(f64, 2), try evalLuaNumber(lua_engine.lua, "return flr(2.9)"));
 }
+
+// ══════════════════════════════════════════════════
+// Preprocessor Edge Cases
+// ══════════════════════════════════════════════════
+
+test "preprocessor: normal if-then not treated as short-if" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "if (x) < 5 then y=1 end\n");
+    defer alloc.free(result);
+    // Should remain unchanged — the `then` keyword means it is not a short-if
+    try testing.expectEqualStrings("if (x) < 5 then y=1 end\n", result);
+}
+
+test "preprocessor: compound assignment with peek shortcut" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "a+=@b\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "peek(") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "a = a + (") != null);
+}
+
+test "preprocessor: compound assignment to table field with dot" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "t.x += 1\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "t.x = t.x + (1)") != null);
+}
+
+test "preprocessor: compound assignment to table field with bracket" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "t[i] += 1\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "t[i] = t[i] + (1)") != null);
+}
+
+test "preprocessor: integer division in expression" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "a = b\\c+d\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "flr(") != null);
+    // The +d should remain outside the flr call
+    try testing.expect(std.mem.indexOf(u8, result, "+d") != null);
+}
+
+test "preprocessor: integer division assignment" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "a\\=b\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "a = flr(a/(b))") != null);
+}
+
+test "preprocessor: percent as modulo after value char" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "x=a%b\n");
+    defer alloc.free(result);
+    // Should remain as modulo, not become peek2
+    try testing.expect(std.mem.indexOf(u8, result, "peek2(") == null);
+    try testing.expect(std.mem.indexOf(u8, result, "a%b") != null);
+}
+
+test "preprocessor: percent as peek2 after operator" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "x=%addr\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "peek2(") != null);
+}
+
+test "preprocessor: short-while expansion" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "while (x>0) x-=1\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "do") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "end") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "x = x - (1)") != null);
+}
+
+test "preprocessor: long comment on same line is stripped" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "x=1 --[[ comment ]] y=2\n");
+    defer alloc.free(result);
+    // The long comment is stripped, but code after it remains
+    try testing.expect(std.mem.indexOf(u8, result, "--[[ comment ]]") == null);
+    try testing.expect(std.mem.indexOf(u8, result, "x=1") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "y=2") != null);
+}
+
+test "preprocessor: != inside string not transformed" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "x=\"a!=b\"\n");
+    defer alloc.free(result);
+    // The != inside the string should NOT become ~=
+    try testing.expect(std.mem.indexOf(u8, result, "\"a!=b\"") != null);
+}
+
+test "preprocessor: bitwise rotate and lshr operators" {
+    const alloc = testing.allocator;
+    {
+        const result = try preprocessor.preprocess(alloc, "a = b <<> c\n");
+        defer alloc.free(result);
+        try testing.expect(std.mem.indexOf(u8, result, "rotl(") != null);
+    }
+    {
+        const result = try preprocessor.preprocess(alloc, "a = b >>< c\n");
+        defer alloc.free(result);
+        try testing.expect(std.mem.indexOf(u8, result, "rotr(") != null);
+    }
+}
+
+test "preprocessor: bxor operator" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "a = b ^^ c\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "bxor(") != null);
+}
+
+test "preprocessor: peek4 shortcut" {
+    const alloc = testing.allocator;
+    const result = try preprocessor.preprocess(alloc, "a = $0x5000\n");
+    defer alloc.free(result);
+    try testing.expect(std.mem.indexOf(u8, result, "peek4(") != null);
+}
+
+// ══════════════════════════════════════════════════
+// Bitwise / toFixed edge cases
+// ══════════════════════════════════════════════════
+
+test "band baseline" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return band(0, 0)"));
+    try testing.expectEqual(@as(f64, 1), try evalLuaNumber(lua_engine.lua, "return band(1, 1)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return band(1, 2)"));
+}
+
+test "bor and bxor" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return bor(1, 2)"));
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return bxor(1, 2)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return bxor(5, 5)"));
+}
+
+test "bnot" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // bnot(0) in 16:16 fixed point = 0xFFFFFFFF = -0.0000152587890625
+    const result = try evalLuaNumber(lua_engine.lua, "return bnot(0)");
+    // bnot flips all 32 bits, resulting in -1/65536
+    try testing.expect(result < 0);
+}
+
+test "shl and shr" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 4), try evalLuaNumber(lua_engine.lua, "return shl(1, 2)"));
+    try testing.expectEqual(@as(f64, 2), try evalLuaNumber(lua_engine.lua, "return shr(8, 2)"));
+}
+
+test "band with NaN returns 0" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return band(0/0, 1)"));
+}
+
+// ══════════════════════════════════════════════════
+// Map tile 0 skip behavior
+// ══════════════════════════════════════════════════
+
+test "map skips tile 0 by default" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+
+    // Set sprite 1 to all color 5 (first row = 8 pixels, 4 bytes)
+    // Sprite 1 starts at byte offset 4 in sprite sheet (each sprite row = 4 bytes, sprite 1 = offset 4)
+    // Actually sprite 1 starts at byte 4 in memory (8 sprites per row, each 4 bytes wide = 32 bytes per row)
+    // Sprite N: row = N/16, col = N%16, byte offset = row*512 + col*4
+    // Sprite 1: row=0, col=1, offset=4
+    try runLua(lua_engine.lua,
+        \\cls(0)
+        \\for y=0,7 do for x=0,7 do sset(8+x, y, 5) end end
+        \\mset(0, 0, 0)
+        \\mset(1, 0, 1)
+        \\map(0, 0, 0, 0, 2, 1)
+    );
+    // Tile 0 should NOT draw (skipped), so pixel at (0,0) remains 0 (black from cls(0))
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return pget(0,0)"));
+    // Tile 1 (sprite 1) should draw at x=8, so pixel at (8,0) should be color 5
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return pget(8,0)"));
+}
+
+test "map draws tile 0 when flag 0x5F36 set" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+
+    try runLua(lua_engine.lua,
+        \\cls(0)
+        \\for y=0,7 do for x=0,7 do sset(x, y, 3) end end
+        \\mset(0, 0, 0)
+        \\poke(0x5f36, 0x8)
+        \\map(0, 0, 0, 0, 1, 1)
+    );
+    // Tile 0 should now draw, pixel (0,0) should be color 3
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return pget(0,0)"));
+}
+
+// ══════════════════════════════════════════════════
+// P8SCII control codes
+// ══════════════════════════════════════════════════
+
+test "print with color change via \\f" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // \f (0x0c) followed by a hex digit changes the draw color
+    // Print \f5 then "a" — the "a" should be drawn in color 5
+    try runLua(lua_engine.lua, "cls(0) print(\"\\x0c5a\", 0, 0, 7)");
+    // \f5 switches color to 5, then "a" is drawn at x=0
+    // Font for 'a': row 0 has pixel at x=1 (0x4A → high nibble 0100)
+    const color = try evalLuaNumber(lua_engine.lua, "return pget(1, 0)");
+    try testing.expectEqual(@as(f64, 5), color);
+}
+
+test "print with backspace \\b moves cursor back" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // Print "ab" returns x=8, print "a\b" should return x=0 (backed up one char)
+    const normal_x = try evalLuaNumber(lua_engine.lua, "return print('ab', 0, 0, 7)");
+    try testing.expectEqual(@as(f64, 8), normal_x);
+    // \b (0x08) moves cursor back 4 pixels
+    const backspace_x = try evalLuaNumber(lua_engine.lua, "return print('a\\x08', 0, 0, 7)");
+    try testing.expectEqual(@as(f64, 0), backspace_x);
+}
+
+// ══════════════════════════════════════════════════
+// SFX note format in memory
+// ══════════════════════════════════════════════════
+
+test "sfx note memory layout via poke and peek" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // SFX 0 header is at 0x3200, notes start at 0x3204
+    // Each note is 2 bytes (32 notes per SFX, 64 bytes for notes)
+    // SFX 0 occupies 0x3200..0x3243 (68 bytes: 4 header + 64 notes)
+    // Poke a known value to the header area
+    try runLua(lua_engine.lua, "poke(0x3200, 0x10)");
+    try testing.expectEqual(@as(f64, 0x10), try evalLuaNumber(lua_engine.lua, "return peek(0x3200)"));
+    // Poke note data: first note at 0x3204
+    try runLua(lua_engine.lua, "poke(0x3204, 0xAB)");
+    try testing.expectEqual(@as(f64, 0xAB), try evalLuaNumber(lua_engine.lua, "return peek(0x3204)"));
+}
+
+// ══════════════════════════════════════════════════
+// Additional math/API tests
+// ══════════════════════════════════════════════════
+
+test "atan2 four quadrants" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // PICO-8 atan2 returns 0..1 (turns), 0=right, 0.25=up, 0.5=left, 0.75=down
+    // atan2(1, 0) = right = 0
+    const right = try evalLuaNumber(lua_engine.lua, "return atan2(1, 0)");
+    try testing.expect(@abs(right) < 0.01 or @abs(right - 1.0) < 0.01);
+    // atan2(0, -1) = up = 0.25
+    const up = try evalLuaNumber(lua_engine.lua, "return atan2(0, -1)");
+    try testing.expect(@abs(up - 0.25) < 0.01);
+    // atan2(-1, 0) = left = 0.5
+    const left = try evalLuaNumber(lua_engine.lua, "return atan2(-1, 0)");
+    try testing.expect(@abs(left - 0.5) < 0.01);
+    // atan2(0, 1) = down = 0.75
+    const down = try evalLuaNumber(lua_engine.lua, "return atan2(0, 1)");
+    try testing.expect(@abs(down - 0.75) < 0.01);
+}
+
+test "abs with negative values" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return abs(-5)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return abs(0)"));
+    try testing.expectEqual(@as(f64, 3.5), try evalLuaNumber(lua_engine.lua, "return abs(-3.5)"));
+}
+
+test "ceil edge cases" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, -2), try evalLuaNumber(lua_engine.lua, "return ceil(-2.5)"));
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return ceil(2.1)"));
+    try testing.expectEqual(@as(f64, 1), try evalLuaNumber(lua_engine.lua, "return ceil(1)"));
+}
+
+test "mid with three arguments" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return mid(1, 5, 10)"));
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return mid(5, 1, 10)"));
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return mid(10, 5, 1)"));
+    try testing.expectEqual(@as(f64, 5), try evalLuaNumber(lua_engine.lua, "return mid(10, 1, 5)"));
+}
+
+test "tostr and tonum round-trip" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 42), try evalLuaNumber(lua_engine.lua, "return tonum(tostr(42))"));
+    try testing.expectEqual(@as(f64, -7), try evalLuaNumber(lua_engine.lua, "return tonum(tostr(-7))"));
+}
+
+test "min and max" {
+    var memory = Memory.init();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return min(3, 7)"));
+    try testing.expectEqual(@as(f64, 7), try evalLuaNumber(lua_engine.lua, "return max(3, 7)"));
+    try testing.expectEqual(@as(f64, -5), try evalLuaNumber(lua_engine.lua, "return min(-5, 0)"));
+}
