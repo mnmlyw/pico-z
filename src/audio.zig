@@ -149,12 +149,24 @@ pub const Audio = struct {
         if (channel_req >= 0 and channel_req < NUM_CHANNELS) {
             ch = @intCast(channel_req);
         } else {
-            // Auto-assign: find free or oldest channel
+            // Auto-assign: find free channel, or steal the one furthest into its SFX
             ch = 0;
+            var found_free = false;
             for (0..NUM_CHANNELS) |i| {
                 if (self.channels[i].finished) {
                     ch = i;
+                    found_free = true;
                     break;
+                }
+            }
+            if (!found_free) {
+                // Steal the channel with the highest note_index (most progressed)
+                var max_progress: u8 = 0;
+                for (0..NUM_CHANNELS) |i| {
+                    if (self.channels[i].note_index >= max_progress) {
+                        max_progress = self.channels[i].note_index;
+                        ch = i;
+                    }
                 }
             }
         }
@@ -569,6 +581,7 @@ pub const Audio = struct {
             }
         }
 
+        self.music_state.tick = 0;
         self.music_state.total_patterns += 1;
         self.startMusicPattern();
     }

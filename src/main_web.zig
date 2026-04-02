@@ -37,6 +37,7 @@ export fn web_free(ptr: [*]u8, len: u32) void {
 
 /// Initialize emulator with cart data. Returns 0 on success, 1 on error.
 export fn web_init(cart_ptr: [*]const u8, cart_len: u32) u32 {
+    initialized = false;
     memory = Memory.init();
     memory.initDrawState();
     input = input_mod.Input{};

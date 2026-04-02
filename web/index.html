@@ -188,9 +188,10 @@ function loadCart(bytes) {
   document.getElementById('screen').focus();
 
   if (!audioCtx) setupAudio();
+  const wasRunning = running;
   running = true;
   lastFrameTime = 0;
-  requestAnimationFrame(frame);
+  if (!wasRunning) requestAnimationFrame(frame);
 }
 
 function showError(msg) {

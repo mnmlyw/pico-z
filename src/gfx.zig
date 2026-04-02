@@ -168,7 +168,7 @@ pub fn api_line(lua: *zlua.Lua) i32 {
         return 0;
     }
 
-    if (lua.isNoneOrNil(3)) {
+    if (lua.isNoneOrNil(4)) {
         // line(x1, y1, [col]): draw from last endpoint to (x1,y1)
         const x1 = luaToInt(lua, 1);
         const y1 = luaToInt(lua, 2);
