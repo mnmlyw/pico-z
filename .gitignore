@@ -2,6 +2,7 @@
 .claude/
 .zig-cache/
 zig-out/
+zig-pkg/
 dist/
 *.p8
 *.p8.png

@@ -12,7 +12,7 @@ zig build -Dweb                # build WASM module to web/
 bash build.sh v0.2.0           # cross-compile release zips to dist/
 ```
 
-Requires Zig 0.15+. Do not auto-launch the app — only build unless explicitly asked to run.
+Requires Zig 0.16+. Do not auto-launch the app — only build unless explicitly asked to run.
 
 ## Architecture
 

@@ -84,10 +84,11 @@ pub fn configure(
         // WASI emulation flags for Lua's C code
         if (is_wasi) "-D_WASI_EMULATED_PROCESS_CLOCKS" else "",
         if (is_wasi) "-D_WASI_EMULATED_SIGNAL" else "",
-        // For WASM: enable LLVM's SjLj lowering pass which transforms
-        // setjmp/longjmp into WASM exception handling instructions
-        if (is_wasi) "-mllvm" else "",
-        if (is_wasi) "-wasm-enable-sjlj" else "",
+        // pico-z patch: do NOT enable wasm-enable-sjlj here. The pico-z
+        // WASM build overrides LUAI_TRY/LUAI_THROW via user.h to bypass
+        // setjmp entirely (workaround for a zig 0.16 wasi libc bug).
+        // Enabling the LLVM transform without +exception_handling in cpu
+        // features causes "Cannot select: catchret" errors.
     };
 
     if (is_wasi) {

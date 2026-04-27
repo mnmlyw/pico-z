@@ -27,6 +27,7 @@ fn makeTestPico(memory: *Memory, input: *input_mod.Input, pixel_buffer: *[api.SC
         .input = input,
         .audio = null,
         .allocator = testing.allocator,
+        .io = testing.io,
     };
 }
 
@@ -51,9 +52,9 @@ fn evalLuaNumber(lua: *zlua.Lua, code: []const u8) !f64 {
 }
 
 fn writeTextFile(path: []const u8, data: []const u8) !void {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(data);
+    var file = try std.Io.Dir.cwd().createFile(testing.io, path, .{ .truncate = true });
+    defer file.close(testing.io);
+    try file.writeStreamingAll(testing.io, data);
 }
 
 fn hexDigit(n: u8) u8 {
@@ -395,11 +396,11 @@ test "flushCartdata keeps dirty flag until save succeeds" {
     pico.cart_data_dirty = true;
 
     const Stub = struct {
-        fn fail(_: std.mem.Allocator, _: *Memory, _: []const u8) !void {
+        fn fail(_: std.mem.Allocator, _: std.Io, _: *Memory, _: []const u8) !void {
             return error.WriteFailed;
         }
 
-        fn ok(_: std.mem.Allocator, _: *Memory, _: []const u8) !void {}
+        fn ok(_: std.mem.Allocator, _: std.Io, _: *Memory, _: []const u8) !void {}
     };
 
     api.flushCartdataWith(&pico, Stub.fail);
@@ -434,10 +435,10 @@ test "prepareForCartLoad resets cart runtime state" {
 test "save-state load leaves runtime untouched on corrupted Lua globals" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();
@@ -459,11 +460,11 @@ test "save-state load leaves runtime untouched on corrupted Lua globals" {
     try save_state.saveState(&pico, &lua_engine, "cart.p8");
 
     const save_path = "cart.sav";
-    var data = try std.fs.cwd().readFileAlloc(testing.allocator, save_path, 1024 * 1024);
+    var data = try std.Io.Dir.cwd().readFileAlloc(testing.io, save_path, testing.allocator, .limited(1024 * 1024));
     defer testing.allocator.free(data);
-    const save_file = try std.fs.cwd().createFile(save_path, .{ .truncate = true });
-    defer save_file.close();
-    try save_file.writeAll(data[0 .. data.len - 1]);
+    var save_file = try std.Io.Dir.cwd().createFile(testing.io, save_path, .{ .truncate = true });
+    defer save_file.close(testing.io);
+    try save_file.writeStreamingAll(testing.io, data[0 .. data.len - 1]);
 
     pico.memory.ram[0x1234] = 0xaa;
     pico.input.btn_state[0] = 0x34;
@@ -496,10 +497,10 @@ test "save-state creation fails when Lua globals cannot serialize" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     var input = input_mod.Input{};
@@ -511,7 +512,7 @@ test "save-state creation fails when Lua globals cannot serialize" {
     try runLua(lua_engine.lua, "table.concat = 1");
 
     try testing.expectError(error.LuaSerializerExecError, save_state.saveState(&pico, &lua_engine, "cart.p8"));
-    try testing.expectError(error.FileNotFound, std.fs.cwd().access("cart.sav", .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(testing.io, "cart.sav", .{}));
 }
 
 test "save-state load leaves runtime untouched on Lua restore parse error" {
@@ -521,10 +522,10 @@ test "save-state load leaves runtime untouched on Lua restore parse error" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();
@@ -539,12 +540,12 @@ test "save-state load leaves runtime untouched on Lua restore parse error" {
     pico.elapsed_time = 2.22;
     try save_state.saveState(&pico, &lua_engine, "cart.p8");
 
-    const data = try std.fs.cwd().readFileAlloc(testing.allocator, "cart.sav", 1024 * 1024);
+    const data = try std.Io.Dir.cwd().readFileAlloc(testing.io, "cart.sav", testing.allocator, .limited(1024 * 1024));
     defer testing.allocator.free(data);
     try overwriteSaveScript(data, "@");
-    const save_file = try std.fs.cwd().createFile("cart.sav", .{ .truncate = true });
-    defer save_file.close();
-    try save_file.writeAll(data);
+    var save_file = try std.Io.Dir.cwd().createFile(testing.io, "cart.sav", .{ .truncate = true });
+    defer save_file.close(testing.io);
+    try save_file.writeStreamingAll(testing.io, data);
 
     pico.memory.ram[0x1234] = 0xaa;
     pico.memory.rom[0x234] = 0xbb;
@@ -561,10 +562,10 @@ test "save-state load leaves runtime untouched on Lua restore parse error" {
 test "save-state round-trip restores high rom and elapsed time" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     var input = input_mod.Input{};
@@ -590,10 +591,10 @@ test "save-state round-trip restores high rom and elapsed time" {
 test "rng state round-trips through save state" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();
@@ -620,10 +621,10 @@ test "rng state round-trips through save state" {
 test "save-state preserves function references in objects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();
@@ -659,10 +660,10 @@ test "save-state preserves function references in objects" {
 test "save-state preserves metatables" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();
@@ -692,10 +693,10 @@ test "save-state preserves metatables" {
 test "save-state preserves top-level functions across double save/load" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();
@@ -740,13 +741,13 @@ test "cartdata retries after transient attach failure" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
-    try std.fs.cwd().makePath(".pico-z-cartdata");
-    try std.fs.cwd().makeDir(".pico-z-cartdata/retry.dat");
+    try std.Io.Dir.cwd().createDirPath(testing.io, ".pico-z-cartdata");
+    try std.Io.Dir.cwd().createDir(testing.io, ".pico-z-cartdata/retry.dat", .default_dir);
 
     var memory = Memory.init();
     var input = input_mod.Input{};
@@ -761,15 +762,15 @@ test "cartdata retries after transient attach failure" {
     try testing.expect(pico.cart_data_id == null);
     try testing.expectEqual(@as(u8, 0xaa), memory.ram[mem_const.ADDR_CART_DATA]);
 
-    try std.fs.cwd().deleteDir(".pico-z-cartdata/retry.dat");
-    const file = try std.fs.cwd().createFile(".pico-z-cartdata/retry.dat", .{});
-    defer file.close();
+    try std.Io.Dir.cwd().deleteDir(testing.io, ".pico-z-cartdata/retry.dat");
+    var file = try std.Io.Dir.cwd().createFile(testing.io, ".pico-z-cartdata/retry.dat", .{});
+    defer file.close(testing.io);
     var bytes = [_]u8{0} ** 256;
     bytes[0] = 0x44;
     bytes[1] = 0x33;
     bytes[2] = 0x22;
     bytes[3] = 0x11;
-    try file.writeAll(&bytes);
+    try file.writeStreamingAll(testing.io, &bytes);
 
     try runLua(lua_engine.lua, "cartdata('retry')");
     try testing.expect(pico.cart_data_id != null);
@@ -780,10 +781,10 @@ test "cartdata retries after transient attach failure" {
 test "loadCart flushes dirty cartdata before reload and reattaches it in _init" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     try writeTextFile(
         "reload_cart.p8",
@@ -824,10 +825,10 @@ test "loadCart flushes dirty cartdata before reload and reattaches it in _init" 
 test "loadCart preserves stat(6) params for cart startup" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     try writeTextFile(
         "param_cart.p8",
@@ -857,13 +858,13 @@ test "loadCart preserves stat(6) params for cart startup" {
 test "loadCart resolves relative reloads against the new cart directory during startup" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
-    try std.fs.cwd().makePath("old");
-    try std.fs.cwd().makePath("new");
+    try std.Io.Dir.cwd().createDirPath(testing.io, "old");
+    try std.Io.Dir.cwd().createDirPath(testing.io, "new");
     try writeGfxCart("old/data.p8", 0x43);
     try writeGfxCart("new/data.p8", 0x21);
     try writeTextFile(
@@ -902,10 +903,10 @@ test "loadCart aborts before replacing memory when cartdata flush fails" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     try writeTextFile(
         "blocked_reload.p8",
@@ -1818,10 +1819,10 @@ test "cstore copies RAM to ROM and reload restores it" {
 test "dget/dset round-trip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var old_cwd = try std.fs.cwd().openDir(".", .{});
-    defer old_cwd.close();
-    try tmp.dir.setAsCwd();
-    defer old_cwd.setAsCwd() catch unreachable;
+    var old_cwd = try std.Io.Dir.cwd().openDir(testing.io, ".", .{});
+    defer old_cwd.close(testing.io);
+    try std.process.setCurrentDir(testing.io, tmp.dir);
+    defer std.process.setCurrentDir(testing.io, old_cwd) catch unreachable;
 
     var memory = Memory.init();
     memory.initDrawState();

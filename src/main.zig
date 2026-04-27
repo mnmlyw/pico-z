@@ -18,13 +18,12 @@ const WINDOW_SCALE = 4;
 const WINDOW_W = SCREEN_W * WINDOW_SCALE;
 const WINDOW_H = SCREEN_H * WINDOW_SCALE;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Get cart path from args
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args.deinit();
     _ = args.next(); // skip program name
     const cart_path = args.next();
@@ -77,7 +76,7 @@ pub fn main() !void {
     @memset(&pixel_buffer, 0xFF000000); // black
 
     // Save/load indicator state
-    var indicator_end_time: i128 = 0;
+    var indicator_end_time: std.Io.Timestamp = .zero;
 
     var audio = audio_mod.Audio.init(&memory);
     defer audio.deinit();
@@ -89,6 +88,7 @@ pub fn main() !void {
         .input = &input,
         .audio = &audio,
         .allocator = allocator,
+        .io = io,
     };
     defer if (pico.cart_data_id) |id| allocator.free(id);
 
@@ -114,7 +114,7 @@ pub fn main() !void {
     var frame_overran = false;
 
     while (running) {
-        const frame_start = std.time.nanoTimestamp();
+        const frame_start = std.Io.Timestamp.now(io, .awake);
 
         // Reset per-frame input state before polling new events
         input.mouse_wheel = 0;
@@ -128,7 +128,7 @@ pub fn main() !void {
                 if (event.key.key == c.SDLK_P) {
                     if (current_cart_path) |path| {
                         if (save_state.saveState(&pico, &lua_engine, path)) |_| {
-                            indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                            indicator_end_time = std.Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(2));
                         } else |err| {
                             std.log.err("save state failed: {}", .{err});
                         }
@@ -137,7 +137,7 @@ pub fn main() !void {
                 if (event.key.key == c.SDLK_L) {
                     if (current_cart_path) |path| {
                         if (save_state.loadState(&pico, &lua_engine, path)) |_| {
-                            indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                            indicator_end_time = std.Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(2));
                         } else |err| {
                             std.log.err("load state failed: {}", .{err});
                         }
@@ -149,7 +149,7 @@ pub fn main() !void {
                         loadCart(&pico, &lua_engine, allocator, path) catch |err| {
                             std.log.err("cart reload failed: {}", .{err});
                         };
-                        indicator_end_time = std.time.nanoTimestamp() + 2_000_000_000;
+                        indicator_end_time = std.Io.Timestamp.now(io, .awake).addDuration(.fromSeconds(2));
                     }
                 }
             }
@@ -270,9 +270,9 @@ pub fn main() !void {
         gfx.renderToARGB(&memory, &pixel_buffer);
 
         // Draw save/load indicator: 2px screen border cycling through 16 colors
-        if (frame_start < indicator_end_time) {
+        if (frame_start.nanoseconds < indicator_end_time.nanoseconds) {
             const palette = @import("palette.zig");
-            const elapsed_ns: u64 = @intCast(indicator_end_time - frame_start);
+            const elapsed_ns: u64 = @intCast(frame_start.durationTo(indicator_end_time).nanoseconds);
             const color_idx: u5 = @intCast((elapsed_ns / 50_000_000) % 16);
             const color = palette.colors[color_idx];
             for (0..SCREEN_H) |y| {
@@ -296,11 +296,11 @@ pub fn main() !void {
         pico.target_fps = if (lua_engine.use60fps()) 60 else 30;
         pico.elapsed_time += 1.0 / @as(f64, @floatFromInt(pico.target_fps));
         const frame_time_ns: u64 = 1_000_000_000 / @as(u64, pico.target_fps);
-        const frame_end = std.time.nanoTimestamp();
-        const elapsed: u64 = @intCast(frame_end - frame_start);
+        const frame_end = std.Io.Timestamp.now(io, .awake);
+        const elapsed: u64 = @intCast(frame_start.durationTo(frame_end).nanoseconds);
         frame_overran = elapsed > frame_time_ns;
         if (!frame_overran) {
-            std.Thread.sleep(frame_time_ns - elapsed);
+            io.sleep(.fromNanoseconds(@intCast(frame_time_ns - elapsed)), .awake) catch {};
         }
     }
 }
@@ -313,9 +313,9 @@ pub fn loadCart(pico: *api.PicoState, lua_engine: *LuaEngine, allocator: std.mem
     const next_cart_dir = std.fs.path.dirname(path);
 
     var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
-        try cart_mod.loadP8PngFile(allocator, path, &next_memory)
+        try cart_mod.loadP8PngFile(allocator, pico.io, path, &next_memory)
     else
-        try cart_mod.loadP8File(allocator, path, &next_memory);
+        try cart_mod.loadP8File(allocator, pico.io, path, &next_memory);
     defer cart.deinit();
 
     // Persist dirty cartdata before replacing RAM/ROM with a new cart.

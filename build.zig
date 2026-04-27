@@ -54,12 +54,20 @@ pub fn build(b: *std.Build) void {
         const wasm_target = b.resolveTargetQuery(.{
             .cpu_arch = .wasm32,
             .os_tag = .wasi,
-            .cpu_features_add = std.Target.wasm.featureSet(&.{.exception_handling}),
         });
+        // Workaround for Zig 0.16 wasi libc bug: rt.c fails to build with
+        // exception_handling enabled because zig doesn't pass `-mllvm
+        // -wasm-enable-sjlj` to its own libc compile. We instead leave
+        // exception_handling out of the cpu features and shadow
+        // <setjmp.h> via include/wasm/ so lua's compile picks up our
+        // own runtime in src/wasm_stubs.c. Routed through zlua's
+        // `lua_user_h` option which adds the file's directory to the
+        // lua compile's include path.
         const zlua_wasm = b.dependency("zlua", .{
             .target = wasm_target,
             .optimize = .ReleaseFast,
             .lang = .lua52,
+            .lua_user_h = b.path("include/wasm/user.h"),
         });
         const web_mod = b.createModule(.{
             .root_source_file = b.path("src/main_web.zig"),
@@ -69,6 +77,8 @@ pub fn build(b: *std.Build) void {
         web_mod.addImport("zlua", zlua_wasm.module("zlua"));
         web_mod.linkSystemLibrary("wasi-emulated-process-clocks", .{});
         web_mod.linkSystemLibrary("wasi-emulated-signal", .{});
+        // Override the broken bundled wasi setjmp.h — see include/wasm/setjmp.h
+        web_mod.addIncludePath(b.path("include/wasm"));
         web_mod.addIncludePath(zlua_wasm.artifact("lua").getEmittedIncludeTree());
         web_mod.addCSourceFile(.{ .file = b.path("src/wasm_stubs.c") });
         const web_lib = b.addExecutable(.{

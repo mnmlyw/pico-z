@@ -50,6 +50,7 @@ export fn web_init(cart_ptr: [*]const u8, cart_len: u32) u32 {
         .input = &input,
         .audio = &audio,
         .allocator = wasm_allocator,
+        .io = std.Io.failing,
     };
 
     lua_engine = LuaEngine.init(wasm_allocator, &pico) catch return 1;

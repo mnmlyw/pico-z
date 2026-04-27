@@ -199,7 +199,7 @@ fn preprocessAndProcessLine(allocator: std.mem.Allocator, raw_line: []const u8, 
 }
 
 fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in_long_comment: *bool, long_comment_level: *usize, in_long_string: *bool, long_string_level: *usize) !void {
-    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    const trimmed = std.mem.trimStart(u8, line, " \t");
 
     // ?msg -> print(msg)
     if (trimmed.len > 0 and trimmed[0] == '?') {
@@ -526,7 +526,7 @@ fn tryCompoundAssign(allocator: std.mem.Allocator, line: []const u8, pos: usize,
     // Preprocess RHS so operators like %src>>>4 get transformed
     const processed_rhs = if (raw_rhs.len > 0) (preprocess(allocator, raw_rhs) catch null) else null;
     defer if (processed_rhs) |p| allocator.free(p);
-    const rhs = if (processed_rhs) |p| std.mem.trimRight(u8, p, "\n") else raw_rhs;
+    const rhs = if (processed_rhs) |p| std.mem.trimEnd(u8, p, "\n") else raw_rhs;
 
     // If RHS is empty (continues on next line), only handle simple op cases
     // where we can emit "lhs = lhs op" and let the next line continue the expression
@@ -692,7 +692,7 @@ fn expandShortIfs(allocator: std.mem.Allocator, line: []const u8) !?[]const u8 {
                     if (!has_sep) {
                         // Short form detected! Check if body is non-empty
                         const body_start = k + 1;
-                        const rest = std.mem.trimLeft(u8, line[body_start..], " \t");
+                        const rest = std.mem.trimStart(u8, line[body_start..], " \t");
                         if (rest.len > 0) {
                             // Emit: keyword COND separator
                             try result.appendSlice(allocator, kw.keyword);

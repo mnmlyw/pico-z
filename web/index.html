@@ -80,8 +80,12 @@ function sjljRuntime() {
 }
 
 // Minimal WASI stubs — Lua's C code links against WASI but we only need
-// fd_write (for printh/debug output) and clock_time_get (for time).
+// fd_write (for printh/debug output), clock_time_get, and random_get to
+// actually work; the rest just have to be callable.
 function wasiStubs() {
+  const EBADF = 8;
+  const ENOENT = 44;
+  const ENOSYS = 52;
   return {
     environ_sizes_get: (count_ptr, size_ptr) => {
       const view = new DataView(mem.buffer);
@@ -90,10 +94,20 @@ function wasiStubs() {
       return 0;
     },
     environ_get: () => 0,
+    clock_res_get: (id, out_ptr) => {
+      const view = new DataView(mem.buffer);
+      view.setBigUint64(out_ptr, 1000n, true); // 1µs resolution
+      return 0;
+    },
     clock_time_get: (id, precision, out_ptr) => {
       const view = new DataView(mem.buffer);
       const ns = BigInt(Math.floor(performance.now() * 1e6));
       view.setBigUint64(out_ptr, ns, true);
+      return 0;
+    },
+    random_get: (buf_ptr, buf_len) => {
+      const bytes = new Uint8Array(mem.buffer, buf_ptr, buf_len);
+      crypto.getRandomValues(bytes);
       return 0;
     },
     fd_write: (fd, iovs_ptr, iovs_len, nwritten_ptr) => {
@@ -110,9 +124,13 @@ function wasiStubs() {
       view.setUint32(nwritten_ptr, written, true);
       return 0;
     },
-    fd_read: () => 8, // EBADF
+    fd_read: () => EBADF,
+    fd_pread: () => EBADF,
+    fd_pwrite: () => EBADF,
     fd_close: () => 0,
-    fd_seek: () => 8,
+    fd_seek: () => EBADF,
+    fd_sync: () => 0,
+    fd_readdir: () => EBADF,
     fd_fdstat_get: (fd, buf) => {
       const view = new DataView(mem.buffer);
       view.setUint8(buf, 4); // regular file
@@ -122,13 +140,24 @@ function wasiStubs() {
       return 0;
     },
     fd_fdstat_set_flags: () => 0,
-    fd_filestat_get: () => 8,
-    fd_prestat_get: () => 8,
-    fd_prestat_dir_name: () => 8,
-    fd_pwrite: () => 8,
-    fd_renumber: () => 8,
-    path_open: () => 44, // ENOENT
-    proc_exit: (code) => { console.log('proc_exit:', code); },
+    fd_filestat_get: () => EBADF,
+    fd_filestat_set_size: () => EBADF,
+    fd_filestat_set_times: () => EBADF,
+    fd_prestat_get: () => EBADF,
+    fd_prestat_dir_name: () => EBADF,
+    fd_renumber: () => EBADF,
+    path_open: () => ENOENT,
+    path_create_directory: () => ENOSYS,
+    path_filestat_get: () => ENOENT,
+    path_filestat_set_times: () => ENOENT,
+    path_link: () => ENOSYS,
+    path_readlink: () => ENOSYS,
+    path_remove_directory: () => ENOSYS,
+    path_rename: () => ENOSYS,
+    path_symlink: () => ENOSYS,
+    path_unlink_file: () => ENOSYS,
+    poll_oneoff: () => ENOSYS,
+    proc_exit: (code) => { console.log('proc_exit:', code); throw new Error('proc_exit ' + code); },
   };
 }
 

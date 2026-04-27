@@ -29,6 +29,7 @@ pub const PicoState = struct {
     cart_data_id: ?[]const u8 = null,
     cart_data_dirty: bool = false,
     allocator: std.mem.Allocator,
+    io: std.Io,
     target_fps: u8 = 30,
     rng_state: u32 = 1,
 
@@ -212,7 +213,7 @@ pub fn flushCartdata(pico: *PicoState) void {
 pub fn flushCartdataWith(pico: *PicoState, save_fn: anytype) void {
     if (!pico.cart_data_dirty) return;
     if (pico.cart_data_id) |id| {
-        save_fn(pico.allocator, pico.memory, id) catch |err| {
+        save_fn(pico.allocator, pico.io, pico.memory, id) catch |err| {
             std.log.warn("cartdata save failed for {s}: {}", .{ id, err });
             return;
         };
@@ -461,9 +462,9 @@ fn loadExternalCartRom(pico: *PicoState, filename: []const u8) ![]u8 {
 
     var temp_mem = Memory.init();
     var cart = if (std.mem.endsWith(u8, path, ".p8.png"))
-        try cart_mod.loadP8PngFile(pico.allocator, path, &temp_mem)
+        try cart_mod.loadP8PngFile(pico.allocator, pico.io, path, &temp_mem)
     else
-        try cart_mod.loadP8File(pico.allocator, path, &temp_mem);
+        try cart_mod.loadP8File(pico.allocator, pico.io, path, &temp_mem);
     defer cart.deinit();
 
     // Return copy of the loaded ROM data (first 0x4300 bytes)
@@ -623,7 +624,8 @@ fn api_stat(lua: *zlua.Lua) c_int {
         },
         80...85 => {
             // UTC time: year, month, day, hour, minute, second
-            const ts = std.time.timestamp();
+            const c_time = @cImport({ @cInclude("time.h"); });
+            const ts = c_time.time(null);
             const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
             const day_seconds = epoch.getDaySeconds();
             const year_day = epoch.getEpochDay().calculateYearDay();
@@ -687,7 +689,7 @@ fn api_cartdata(lua: *zlua.Lua) c_int {
     }
 
     const owned_id = pico.allocator.dupe(u8, id) catch return 0;
-    cartdata_store.load(pico.allocator, pico.memory, owned_id) catch |err| {
+    cartdata_store.load(pico.allocator, pico.io, pico.memory, owned_id) catch |err| {
         // Transient I/O error — don't commit the ID so retry is possible
         std.log.warn("cartdata load failed for {s}: {}", .{ owned_id, err });
         pico.allocator.free(owned_id);

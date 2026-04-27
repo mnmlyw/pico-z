@@ -11,10 +11,8 @@ pub const Cart = struct {
     }
 };
 
-pub fn loadP8File(allocator: std.mem.Allocator, path: []const u8, memory: *Memory) !Cart {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+pub fn loadP8File(allocator: std.mem.Allocator, io: std.Io, path: []const u8, memory: *Memory) !Cart {
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(content);
 
     return parseP8(allocator, content, memory);
@@ -38,7 +36,7 @@ fn parseP8(allocator: std.mem.Allocator, content: []const u8, memory: *Memory) !
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
-        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
 
         // Check for section headers
         if (std.mem.startsWith(u8, line, "__lua__")) {
@@ -216,10 +214,8 @@ fn parseSfxLine(memory: *Memory, line: []const u8, row: usize) void {
 
 // --- .p8.png support ---
 
-pub fn loadP8PngFile(allocator: std.mem.Allocator, path: []const u8, memory: *Memory) !Cart {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 4 * 1024 * 1024);
+pub fn loadP8PngFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8, memory: *Memory) !Cart {
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4 * 1024 * 1024));
     defer allocator.free(content);
 
     return parseP8Png(allocator, content, memory);

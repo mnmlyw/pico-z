@@ -92,7 +92,7 @@ pub fn saveState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     const data = try serializeState(pico, lua_engine);
     defer alloc.free(data);
 
-    try fs_atomic.writeFileAtomic(alloc, std.fs.cwd(), save_path, data);
+    try fs_atomic.writeFileAtomic(alloc, pico.io, std.Io.Dir.cwd(), save_path, data);
     std.log.info("save state written to {s}", .{save_path});
 }
 
@@ -107,12 +107,10 @@ pub fn loadState(pico: *api.PicoState, lua_engine: *LuaEngine, cart_path: []cons
     const save_path = try getSavePath(alloc, cart_path);
     defer alloc.free(save_path);
 
-    const file = std.fs.cwd().openFile(save_path, .{}) catch |err| {
+    const data = std.Io.Dir.cwd().readFileAlloc(pico.io, save_path, alloc, .limited(16 * 1024 * 1024)) catch |err| {
         std.log.warn("no save state found: {s}", .{save_path});
         return err;
     };
-    defer file.close();
-    const data = try file.readToEndAlloc(alloc, 16 * 1024 * 1024);
     defer alloc.free(data);
 
     var cursor = ReadCursor{ .data = data };

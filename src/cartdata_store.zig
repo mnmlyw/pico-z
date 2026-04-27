@@ -42,51 +42,49 @@ fn cartDataSlice(memory: *Memory) []u8 {
     return memory.ram[mem_const.ADDR_CART_DATA .. mem_const.ADDR_CART_DATA + CARTDATA_BYTES];
 }
 
-pub fn load(allocator: std.mem.Allocator, memory: *Memory, id: []const u8) !void {
+pub fn load(allocator: std.mem.Allocator, io: std.Io, memory: *Memory, id: []const u8) !void {
     const path = try pathForId(allocator, id);
     defer allocator.free(path);
 
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+    const buf = std.Io.Dir.cwd().readFile(io, path, cartDataSlice(memory)) catch |err| switch (err) {
         error.FileNotFound => {
             @memset(cartDataSlice(memory), 0);
             return;
         },
         else => return err,
     };
-    defer file.close();
-
-    const bytes = try file.readAll(cartDataSlice(memory));
-    if (bytes < CARTDATA_BYTES) {
-        @memset(cartDataSlice(memory)[bytes..], 0);
+    if (buf.len < CARTDATA_BYTES) {
+        @memset(cartDataSlice(memory)[buf.len..], 0);
     }
 }
 
-pub fn save(allocator: std.mem.Allocator, memory: *Memory, id: []const u8) !void {
-    try std.fs.cwd().makePath(CARTDATA_DIR);
+pub fn save(allocator: std.mem.Allocator, io: std.Io, memory: *Memory, id: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, CARTDATA_DIR);
 
     const path = try pathForId(allocator, id);
     defer allocator.free(path);
 
     // Use atomic replace so existing cartdata survives interrupted writes.
-    try fs_atomic.writeFileAtomic(allocator, std.fs.cwd(), path, cartDataSlice(memory));
+    try fs_atomic.writeFileAtomic(allocator, io, std.Io.Dir.cwd(), path, cartDataSlice(memory));
 }
 
 test "cartdata roundtrip" {
     var mem = Memory.init();
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const id = "test_roundtrip";
     const path = try pathForId(allocator, id);
     defer allocator.free(path);
-    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
-    try std.fs.cwd().makePath(CARTDATA_DIR);
+    try std.Io.Dir.cwd().createDirPath(io, CARTDATA_DIR);
 
     mem.poke32(mem_const.ADDR_CART_DATA + 0 * 4, 0x11223344);
     mem.poke32(mem_const.ADDR_CART_DATA + 63 * 4, 0xaabbccdd);
-    try save(allocator, &mem, id);
+    try save(allocator, io, &mem, id);
 
     @memset(cartDataSlice(&mem), 0);
-    try load(allocator, &mem, id);
+    try load(allocator, io, &mem, id);
 
     try std.testing.expectEqual(@as(u32, 0x11223344), mem.peek32(mem_const.ADDR_CART_DATA + 0 * 4));
     try std.testing.expectEqual(@as(u32, 0xaabbccdd), mem.peek32(mem_const.ADDR_CART_DATA + 63 * 4));
@@ -95,13 +93,14 @@ test "cartdata roundtrip" {
 test "cartdata load missing zeroes memory" {
     var mem = Memory.init();
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
     const id = "missing_file_id";
     const path = try pathForId(allocator, id);
     defer allocator.free(path);
-    std.fs.cwd().deleteFile(path) catch {};
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
 
     @memset(cartDataSlice(&mem), 0xaa);
-    try load(allocator, &mem, id);
+    try load(allocator, io, &mem, id);
 
     for (cartDataSlice(&mem)) |b| {
         try std.testing.expectEqual(@as(u8, 0), b);

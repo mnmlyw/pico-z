@@ -1,37 +1,29 @@
 const std = @import("std");
 
-pub fn writeFileAtomic(allocator: std.mem.Allocator, dir: std.fs.Dir, final_path: []const u8, data: []const u8) !void {
+pub fn writeFileAtomic(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, final_path: []const u8, data: []const u8) !void {
     var attempt: u32 = 0;
     while (attempt < 32) : (attempt += 1) {
+        var rand_bytes: [8]u8 = undefined;
+        io.random(&rand_bytes);
+        const rand = std.mem.readInt(u64, &rand_bytes, .little);
         const tmp_path = try std.fmt.allocPrint(
             allocator,
             "{s}.tmp.{x:0>16}.{d}",
-            .{ final_path, std.crypto.random.int(u64), attempt },
+            .{ final_path, rand, attempt },
         );
         defer allocator.free(tmp_path);
 
-        var tmp_file = dir.createFile(tmp_path, .{ .truncate = true, .exclusive = true }) catch |err| switch (err) {
+        var tmp_file = dir.createFile(io, tmp_path, .{ .truncate = true, .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => return err,
         };
-        errdefer dir.deleteFile(tmp_path) catch {};
+        errdefer dir.deleteFile(io, tmp_path) catch {};
 
-        try tmp_file.writeAll(data);
-        try tmp_file.sync();
-        tmp_file.close();
+        try tmp_file.writeStreamingAll(io, data);
+        try tmp_file.sync(io);
+        tmp_file.close(io);
 
-        dir.rename(tmp_path, final_path) catch |err| switch (err) {
-            // Some platforms do not allow replace-on-rename.
-            error.PathAlreadyExists => {
-                dir.deleteFile(final_path) catch |delete_err| switch (delete_err) {
-                    error.FileNotFound => {},
-                    else => return delete_err,
-                };
-                try dir.rename(tmp_path, final_path);
-            },
-            else => return err,
-        };
-
+        try dir.rename(tmp_path, dir, final_path, io);
         return;
     }
 

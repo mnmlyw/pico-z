@@ -2,7 +2,7 @@
     .name = .pico_z,
     .version = "0.1.0",
     .fingerprint = 0xc929b4172eb7883c,
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -13,8 +13,8 @@
             .path = "lib/zlua",
         },
         .sdl = .{
-            .url = "git+https://github.com/castholm/SDL#887fa805e40d5c7bb3955ae69b89ed566c6a0471",
-            .hash = "sdl-0.4.0+3.4.0-SDL--rq2owEZsySGuHCuVJ9naEvH3i3e_pyUIjziBtJ-",
+            .url = "git+https://github.com/castholm/SDL#c5ba24c694b5d520cdc1d029d8def398690d6894",
+            .hash = "sdl-0.4.2+3.4.4-SDL--kB3pQHKG_4zWG-pH04ZcZZj_IRF7dwMpxNVGwd6",
         },
     },
 }
