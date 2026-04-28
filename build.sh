@@ -68,8 +68,12 @@ cd "$OUT" && zip -r "pico-z${VERSION}_macos.zip" pico-z/ && cd "$ROOT"
 rm -rf "$OUT/pico-z"
 
 # Windows
+# ReleaseFast (not ReleaseSafe) — works around a Zig 0.16 translate-c
+# bug where MinGW's wcscat/wcscpy inline-fortify wrappers emit a
+# malformed extern_local_* const block that fails to compile under
+# ReleaseSafe but elides cleanly under Debug/ReleaseFast.
 echo "Building Windows..."
-zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe
+zig build -Dtarget=x86_64-windows -Doptimize=ReleaseFast
 mkdir -p "$OUT/pico-z"
 cp zig-out/bin/pico-z.exe "$OUT/pico-z/pico-z.exe"
 cp "$ROOT/res/license.txt" "$OUT/pico-z/license.txt"
