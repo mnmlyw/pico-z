@@ -58,22 +58,16 @@ jobs:
           files: dist/*.zip
 
   # Keep docs/play (the GH Pages-served web player) in sync with web/.
-  # GH Pages publishes from main:/docs, but builds happen against web/, so
-  # the two would silently drift unless we copy on every main push.
+  # GH Pages publishes from main:/docs, and developers commit the prebuilt
+  # WASM into web/, so we just copy. No rebuild needed.
   pages-sync:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: test
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: ./.github/actions/setup-zig
-        with:
-          version: 0.16.0
-      - name: Build WASM
-        run: zig build -Dweb
-      - name: Sync docs/play with latest web build
+      - name: Sync docs/play with web/
         run: |
           cp web/index.html docs/play/index.html
           cp web/pico-z.wasm docs/play/pico-z.wasm
@@ -84,5 +78,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/play/
-          git commit -m "CI: sync docs/play from web build [skip ci]"
+          git commit -m "CI: sync docs/play from web/ [skip ci]"
           git push
