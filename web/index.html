@@ -28,7 +28,8 @@
   <input type="file" id="file-input" accept=".p8,.png,.p8.png">
   <p style="color:#666;font-size:12px;margin-top:16px;line-height:1.5">
     Open a .p8 or .p8.png cart file. Try <a href="https://www.lexaloffle.com/bbs/?tid=2145" style="color:#29ADFF">Celeste Classic</a><br>
-    or browse the <a href="https://www.lexaloffle.com/bbs/?cat=7" style="color:#29ADFF">PICO-8 BBS</a> for games.
+    or browse the <a href="https://www.lexaloffle.com/bbs/?cat=7" style="color:#29ADFF">PICO-8 BBS</a> for games.<br>
+    <span style="color:#555">` (backtick): pause &nbsp; P: save state &nbsp; L: load state</span>
   </p>
   <div id="error"></div>
 </div>
@@ -40,6 +41,7 @@ function getMemBuf() { return wasm.memory.buffer; }
 const mem = { get buffer() { return wasm ? wasm.memory.buffer : new ArrayBuffer(0); } };
 let buttons = [0, 0];
 let running = false;
+let paused = false;
 
 const KEY_MAP = {
   ArrowLeft:  [0, 0x01], ArrowRight: [0, 0x02], ArrowUp: [0, 0x04], ArrowDown: [0, 0x08],
@@ -48,6 +50,20 @@ const KEY_MAP = {
   s: [1, 0x01], f: [1, 0x02], e: [1, 0x04], d: [1, 0x08],
   Tab: [1, 0x10], q: [1, 0x10], w: [1, 0x20],
 };
+
+// Reserved (player-control) keys: pause = `, save = P, load = L. Backtick
+// is on its own dedicated key (top-left, above Tab) with no browser/OS
+// default action — much less likely to be eaten than Space, Enter, or
+// Escape. Verify at startup that none of them collide with the game key
+// map so a future change to KEY_MAP can't silently break controls.
+const RESERVED_KEYS = ['`', '~', 'p', 'P', 'l', 'L'];
+(function checkKeyConflicts() {
+  const conflicts = RESERVED_KEYS.filter((k) => k in KEY_MAP);
+  if (conflicts.length) {
+    console.error('Key binding conflict — these reserved keys are also game inputs:', conflicts);
+    throw new Error('key binding conflict: ' + conflicts.join(', '));
+  }
+})();
 
 // LLVM WASM SjLj runtime — implements setjmp/longjmp via JS exceptions.
 // LLVM's -wasm-enable-sjlj pass transforms C setjmp/longjmp into calls to
@@ -219,9 +235,19 @@ function loadCart(bytes) {
   if (!audioCtx) setupAudio();
   const wasRunning = running;
   running = true;
+  paused = false;
   lastFrameTime = 0;
   if (!wasRunning) requestAnimationFrame(frame);
 }
+// Expose for e2e tests to load carts programmatically.
+window.loadCart = loadCart;
+window.__pz = {
+  get paused() { return paused; },
+  get running() { return running; },
+  get buttons() { return buttons.slice(); },
+  KEY_MAP,
+  RESERVED_KEYS,
+};
 
 function showError(msg) {
   const el = document.getElementById('error');
@@ -234,6 +260,11 @@ let indicatorEnd = 0; // timestamp when indicator should stop
 
 function frame(timestamp) {
   if (!running) return;
+  if (paused) {
+    drawPausedOverlay();
+    requestAnimationFrame(frame);
+    return;
+  }
   const fps = wasm.web_get_fps();
   const interval = 1000 / fps;
 
@@ -278,6 +309,22 @@ function frame(timestamp) {
   requestAnimationFrame(frame);
 }
 
+function drawPausedOverlay() {
+  // Re-blit last frame, then draw two vertical pause bars near top-right.
+  ctx.putImageData(imageData, 0, 0);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(110, 4, 14, 14);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(113, 6, 3, 10);
+  ctx.fillRect(118, 6, 3, 10);
+}
+
+function togglePause() {
+  if (!wasm || !running) return;
+  paused = !paused;
+  if (!paused) lastFrameTime = 0;
+}
+
 function setupAudio() {
   audioCtx = new AudioContext();
   const actualRate = audioCtx.sampleRate; // browser's native rate (e.g. 48000)
@@ -287,6 +334,7 @@ function setupAudio() {
   const node = audioCtx.createScriptProcessor(2048, 0, 1);
   node.onaudioprocess = (e) => {
     const out = e.outputBuffer.getChannelData(0);
+    if (paused) { out.fill(0); return; }
     // Generate the right number of synth samples, then resample
     const needed = Math.ceil(out.length * ratio);
     const ptr = wasm.web_generate_audio(needed);
@@ -333,9 +381,15 @@ function setupInput() {
   document.addEventListener('keydown', (e) => {
     const m = KEY_MAP[e.key];
     if (m) { buttons[m[0]] |= m[1]; e.preventDefault(); }
-    // Save/load state
-    if (e.key === 'p' || e.key === 'P') { saveStateToStorage(); indicatorEnd = performance.now() + 2000; e.preventDefault(); }
-    if (e.key === 'l' || e.key === 'L') { loadStateFromStorage(); indicatorEnd = performance.now() + 2000; e.preventDefault(); }
+    // Save/load state — guard against auto-repeat firing the toggle
+    // multiple times while the key is held (which leaves state random).
+    if (!e.repeat) {
+      if (e.key === 'p' || e.key === 'P') { saveStateToStorage(); indicatorEnd = performance.now() + 2000; e.preventDefault(); }
+      if (e.key === 'l' || e.key === 'L') { loadStateFromStorage(); indicatorEnd = performance.now() + 2000; e.preventDefault(); }
+      // Pause/resume — backtick (with tilde via shift). Dedicated key, no
+      // browser/OS default action; reliable across platforms.
+      if (e.key === '`' || e.key === '~' || e.code === 'Backquote') { togglePause(); e.preventDefault(); }
+    }
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   });
   document.addEventListener('keyup', (e) => {

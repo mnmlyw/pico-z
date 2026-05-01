@@ -37,6 +37,10 @@ pub const ADDR_PALT = 0x5F00; // transparency stored in high nibble of draw pal
 pub const ADDR_INPUT_P0 = 0x5F4C;
 pub const ADDR_INPUT_P1 = 0x5F4D;
 
+// Sprite/screen page registers (high byte of base address)
+pub const ADDR_SPRITE_PAGE = 0x5F54; // default 0x00 → sprite sheet at 0x0000
+pub const ADDR_SCREEN_PAGE = 0x5F55; // default 0x60 → screen at 0x6000
+
 pub const Memory = struct {
     ram: [RAM_SIZE]u8,
     rom: [RAM_SIZE]u8, // ROM copy for reload()
@@ -45,6 +49,11 @@ pub const Memory = struct {
         var m: Memory = undefined;
         @memset(&m.ram, 0);
         @memset(&m.rom, 0);
+        // Page registers must default to PICO-8's expected base addresses,
+        // not zero — otherwise sprite/screen ops index from address 0 instead
+        // of 0x6000.
+        m.ram[ADDR_SPRITE_PAGE] = 0x00;
+        m.ram[ADDR_SCREEN_PAGE] = 0x60;
         return m;
     }
 
@@ -75,6 +84,22 @@ pub const Memory = struct {
         self.poke16(ADDR_FILL_PAT + 2, 0);
         // Set transparency on color 0
         self.ram[ADDR_DRAW_PAL + 0] |= 0x10; // high nibble = transparent
+        // Sprite/screen page defaults: sprite reads from 0x0000, draws go to 0x6000.
+        self.ram[ADDR_SPRITE_PAGE] = 0x00;
+        self.ram[ADDR_SCREEN_PAGE] = 0x60;
+    }
+
+    // High-byte page registers — sprite/draw operations consult these to find
+    // the actual base address. Carts can poke 0x5F54/0x5F55 to redirect
+    // sprite-read or screen-write to a different region of RAM (e.g.
+    // bigprint's "draw small text, then sspr-scale it from screen-as-sprite"
+    // trick that pokes 0x5F54=0x60).
+    pub fn spriteBase(self: *const Memory) u16 {
+        return @as(u16, self.ram[ADDR_SPRITE_PAGE]) << 8;
+    }
+
+    pub fn screenBase(self: *const Memory) u16 {
+        return @as(u16, self.ram[ADDR_SCREEN_PAGE]) << 8;
     }
 
     pub fn saveRom(self: *Memory) void {
@@ -115,9 +140,11 @@ pub const Memory = struct {
         self.ram[addr +% 3] = @truncate(val >> 24);
     }
 
-    // Screen pixel access (2 pixels per byte, 4-bit color)
+    // Screen pixel access (2 pixels per byte, 4-bit color). Honors the
+    // 0x5F55 screen-page register so carts that redirect draws (e.g.
+    // poke(0x5F55, 0x00) to draw to the sprite sheet) work.
     pub fn screenGet(self: *const Memory, x: u7, y: u7) u4 {
-        const addr: u16 = ADDR_SCREEN + @as(u16, y) * 64 + @as(u16, x) / 2;
+        const addr: u16 = self.screenBase() +% @as(u16, y) * 64 +% @as(u16, x) / 2;
         const byte = self.ram[addr];
         if (x & 1 == 0) {
             return @truncate(byte & 0x0F);
@@ -127,7 +154,7 @@ pub const Memory = struct {
     }
 
     pub fn screenSet(self: *Memory, x: u7, y: u7, color: u4) void {
-        const addr: u16 = ADDR_SCREEN + @as(u16, y) * 64 + @as(u16, x) / 2;
+        const addr: u16 = self.screenBase() +% @as(u16, y) * 64 +% @as(u16, x) / 2;
         if (x & 1 == 0) {
             self.ram[addr] = (self.ram[addr] & 0xF0) | @as(u8, color);
         } else {
@@ -135,10 +162,13 @@ pub const Memory = struct {
         }
     }
 
-    // Sprite sheet pixel access (same layout as screen, at address 0x0000)
+    // Sprite sheet pixel access (same layout as screen). Honors the
+    // 0x5F54 sprite-page register so spr/sspr/map can read pixel data
+    // from a redirected base (e.g. bigprint pokes 0x5F54=0x60 to read
+    // sprites from the screen, scaling rendered text).
     pub fn spriteGet(self: *const Memory, x: u8, y: u8) u4 {
         if (x >= 128 or y >= 128) return 0;
-        const addr: u16 = ADDR_SPRITE + @as(u16, y) * 64 + @as(u16, x) / 2;
+        const addr: u16 = self.spriteBase() +% @as(u16, y) * 64 +% @as(u16, x) / 2;
         const byte = self.ram[addr];
         if (x & 1 == 0) {
             return @truncate(byte & 0x0F);
@@ -149,7 +179,7 @@ pub const Memory = struct {
 
     pub fn spriteSet(self: *Memory, x: u8, y: u8, color: u4) void {
         if (x >= 128 or y >= 128) return;
-        const addr: u16 = ADDR_SPRITE + @as(u16, y) * 64 + @as(u16, x) / 2;
+        const addr: u16 = self.spriteBase() +% @as(u16, y) * 64 +% @as(u16, x) / 2;
         if (x & 1 == 0) {
             self.ram[addr] = (self.ram[addr] & 0xF0) | @as(u8, color);
         } else {

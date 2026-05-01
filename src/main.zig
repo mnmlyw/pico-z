@@ -214,11 +214,13 @@ pub fn main(init: std.process.Init) !void {
         pico.key_states_count = numkeys;
 
         // Run cart — at 30fps, if previous frame overran, call _update twice
-        if (frame_overran and !lua_engine.use60fps()) {
+        // (only when not in mid-flip, to avoid skipping flip-paced animation).
+        if (frame_overran and !lua_engine.use60fps() and lua_engine.tick_co == null) {
             lua_engine.callUpdate();
         }
-        lua_engine.callUpdate();
-        lua_engine.callDraw();
+        // Coroutine-driven tick: flip() inside the cart yields back here so
+        // we can render the in-progress fade/animation correctly.
+        _ = lua_engine.tickFrame();
 
         // Handle multi-cart load() requests
         if (pico.pending_load != null) {

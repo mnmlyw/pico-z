@@ -1,0 +1,26 @@
+# Probe mansion_bros welcome screen — find what advances it
+frames 360
+log mansion_log.txt
+
+# Snap initial frame
+0: screenshot mansion_f0.bmp
+1: dump globals
+
+# Hold X (5) for 30 frames — most carts start with X
+60: hold p0.x for 30
+30: screenshot mansion_pre_x.bmp
+30: dump globals
+70: screenshot mansion_during_x.bmp
+70: dump globals
+120: screenshot mansion_after_x.bmp
+120: dump globals
+
+# Hold O (4) for 30 frames
+180: hold p0.o for 30
+210: screenshot mansion_during_o.bmp
+210: dump globals
+
+# Hold START / direction keys
+270: hold p0.up for 30
+300: screenshot mansion_after_up.bmp
+300: dump globals

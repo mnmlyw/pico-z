@@ -312,8 +312,12 @@ fn processLine(allocator: std.mem.Allocator, line: []const u8, out: *OutList, in
             if (p8sciiButtonId(ch)) |btn_str| {
                 try out.appendSlice(allocator, btn_str);
             } else {
-                // Unknown high byte outside string/comment — drop it
-                // (commonly appears in comments as decorative glyphs)
+                // PICO-8 treats high-byte glyphs as identifier characters; map
+                // each byte deterministically to a Lua-safe identifier so code
+                // like `fills = {🐱,🐶,...}` (glyph variable names → nil) parses.
+                var hex_buf: [6]u8 = undefined;
+                const hex = std.fmt.bufPrint(&hex_buf, "_p8_{x:0>2}", .{ch}) catch unreachable;
+                try out.appendSlice(allocator, hex);
             }
             i += 1;
             continue;
@@ -693,7 +697,14 @@ fn expandShortIfs(allocator: std.mem.Allocator, line: []const u8) !?[]const u8 {
                         // Short form detected! Check if body is non-empty
                         const body_start = k + 1;
                         const rest = std.mem.trimStart(u8, line[body_start..], " \t");
-                        if (rest.len > 0) {
+                        // Skip if the line is a multi-line condition continuation
+                        // (body starts with a binary operator that needs an LHS,
+                        //  or strips down to one). E.g.
+                        //   if (a==1) or
+                        //      (b==2) then
+                        if (isContinuationBody(rest)) {
+                            // Fall through to emit literally
+                        } else if (rest.len > 0) {
                             // Emit: keyword COND separator
                             try result.appendSlice(allocator, kw.keyword);
                             try result.append(allocator, ' ');
@@ -871,6 +882,23 @@ fn extractRHS(line: []const u8, start: usize) RHSResult {
 
 /// Check if a separator keyword (then/do) appears as a whole word in the text,
 /// outside of strings. Used to distinguish short-if from normal if.
+// Returns true if the body after `if (cond)` looks like a multi-line
+// condition continuation rather than a short-if body. Triggers when the
+// body starts with a binary keyword like `or`/`and` (which needs a LHS),
+// meaning the real `then` is on the next line.
+fn isContinuationBody(rest: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, std.mem.trimStart(u8, rest, " \t"), " \t\r\n");
+    if (trimmed.len == 0) return false;
+    const continuation_kws = [_][]const u8{ "or", "and" };
+    for (continuation_kws) |kw| {
+        if (trimmed.len >= kw.len and std.mem.eql(u8, trimmed[0..kw.len], kw)) {
+            const after = if (trimmed.len > kw.len) trimmed[kw.len] else ' ';
+            if (!std.ascii.isAlphanumeric(after) and after != '_') return true;
+        }
+    }
+    return false;
+}
+
 fn hasSeparatorKeyword(text: []const u8, sep: []const u8) bool {
     var j: usize = 0;
     var in_str: u8 = 0;

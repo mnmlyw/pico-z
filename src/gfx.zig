@@ -122,10 +122,19 @@ pub fn renderToARGB(memory: *Memory, pixel_buffer: *[128 * 128]u32) void {
 
 pub fn api_cls(lua: *zlua.Lua) i32 {
     const pico = getPico(lua);
-    const col = getColor(pico.memory, lua, 1);
-    // Fill screen memory directly
+    // PICO-8 spec: cls(col) defaults to 0, NOT the current draw color.
+    // (Carts often leave ADDR_COLOR set to whatever they last drew with —
+    // using that as the cls default would produce a wrong background, e.g.
+    // a yellow gameplay floor when the cart finished drawing in yellow.)
+    const col: u4 = if (lua.isNoneOrNil(1))
+        0
+    else
+        @truncate(@as(u32, @bitCast(luaToInt(lua, 1))) & 0x0F);
+    // Fill screen memory directly — honor 0x5F55 in case the cart has
+    // redirected the screen base.
     const byte = @as(u8, col) | (@as(u8, col) << 4);
-    @memset(pico.memory.ram[mem_const.ADDR_SCREEN..mem_const.ADDR_SCREEN_END], byte);
+    const base = pico.memory.screenBase();
+    @memset(pico.memory.ram[base..base +% 0x2000], byte);
     // Reset cursor
     pico.memory.ram[mem_const.ADDR_CURSOR_X] = 0;
     pico.memory.ram[mem_const.ADDR_CURSOR_Y] = 0;
@@ -601,16 +610,39 @@ pub fn api_sspr(lua: *zlua.Lua) i32 {
     const cam = getCamera(pico.memory);
     if (dw <= 0 or dh <= 0 or sw <= 0 or sh <= 0) return 0;
 
+    // Snapshot the source rectangle first. When sprite source and screen
+    // destination overlap (e.g. bigprint's "scale up the just-drawn text"
+    // trick that pokes 0x5F54=0x60), iterating in place would overwrite
+    // source pixels before we've read them. PICO-8 reads atomically via its
+    // own buffer, so we mimic that here.
+    if (sw > 256 or sh > 256) return 0; // sanity bound
+    var src_buf: [256 * 256]u4 = undefined;
+    {
+        var sj: i32 = 0;
+        while (sj < sh) : (sj += 1) {
+            var si: i32 = 0;
+            while (si < sw) : (si += 1) {
+                const ax = sx + si;
+                const ay = sy + sj;
+                const idx: usize = @intCast(sj * sw + si);
+                if (ax < 0 or ax >= 128 or ay < 0 or ay >= 128) {
+                    src_buf[idx] = 0;
+                } else {
+                    src_buf[idx] = pico.memory.spriteGet(@intCast(@as(u32, @bitCast(ax))), @intCast(@as(u32, @bitCast(ay))));
+                }
+            }
+        }
+    }
+
     var py: i32 = 0;
     while (py < dh) : (py += 1) {
         var px: i32 = 0;
         while (px < dw) : (px += 1) {
-            var src_x = sx + @divTrunc((if (flip_x) dw - 1 - px else px) * sw, dw);
-            var src_y = sy + @divTrunc((if (flip_y) dh - 1 - py else py) * sh, dh);
-            _ = &src_x;
-            _ = &src_y;
-            if (src_x < 0 or src_x >= 128 or src_y < 0 or src_y >= 128) continue;
-            const col = pico.memory.spriteGet(@intCast(@as(u32, @bitCast(src_x))), @intCast(@as(u32, @bitCast(src_y))));
+            const sx_off = @divTrunc((if (flip_x) dw - 1 - px else px) * sw, dw);
+            const sy_off = @divTrunc((if (flip_y) dh - 1 - py else py) * sh, dh);
+            if (sx_off < 0 or sx_off >= sw or sy_off < 0 or sy_off >= sh) continue;
+            const buf_idx: usize = @intCast(sy_off * sw + sx_off);
+            const col = src_buf[buf_idx];
             if (isTransparent(pico.memory, col)) continue;
             putPixelRaw(pico.memory, dx + px - cam.x, dy + py - cam.y, col);
         }
@@ -896,7 +928,8 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                                 const clear_col: u4 = parseHexColor(text[i]);
                                 i += 1;
                                 const byte = @as(u8, clear_col) | (@as(u8, clear_col) << 4);
-                                @memset(memory.ram[mem_const.ADDR_SCREEN..mem_const.ADDR_SCREEN_END], byte);
+                                const sbase = memory.screenBase();
+                                @memset(memory.ram[sbase..sbase +% 0x2000], byte);
                                 x = start_x - cam.x;
                                 y = start_y - cam.y;
                             }

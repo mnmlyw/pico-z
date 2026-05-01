@@ -137,7 +137,13 @@ pub fn api_btn(lua: *zlua.Lua) c_int {
     }
 
     const button: u3 = @intCast(@as(u32, @bitCast(api.luaToInt(lua, 1))) & 7);
-    const player: u1 = @intCast(@as(u32, @bitCast(api.optInt(lua, 2, 0))) & 1);
+    const player_raw = @as(u32, @bitCast(api.optInt(lua, 2, 0)));
+    // We only track 2 players; PICO-8 supports up to 8 — for any unsupported
+    // player slot, return false (NOT alias to player_raw & 1, which would make
+    // higher player numbers spuriously read player 0/1 state and break carts
+    // that probe `btn(b, n)` for n > 1).
+    if (player_raw > 1) { lua.pushBoolean(false); return 1; }
+    const player: u1 = @intCast(player_raw);
     lua.pushBoolean(pico.input.btn(button, player));
     return 1;
 }
@@ -159,7 +165,9 @@ pub fn api_btnp(lua: *zlua.Lua) c_int {
     }
 
     const button: u3 = @intCast(@as(u32, @bitCast(api.luaToInt(lua, 1))) & 7);
-    const player: u1 = @intCast(@as(u32, @bitCast(api.optInt(lua, 2, 0))) & 1);
+    const player_raw = @as(u32, @bitCast(api.optInt(lua, 2, 0)));
+    if (player_raw > 1) { lua.pushBoolean(false); return 1; }
+    const player: u1 = @intCast(player_raw);
     lua.pushBoolean(pico.input.btnp(button, player, mem));
     return 1;
 }

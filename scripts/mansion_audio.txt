@@ -1,0 +1,5 @@
+# Capture 5 seconds of audio: title music, then advance to select.
+frames 300
+audio mansion_audio.wav
+log mansion_log.txt
+60: hold p0.x for 30

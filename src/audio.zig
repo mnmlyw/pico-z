@@ -8,7 +8,7 @@ const is_native = (builtin.os.tag != .freestanding and builtin.os.tag != .wasi);
 const c = if (is_native) @cImport({ @cInclude("SDL3/SDL.h"); }) else struct {};
 pub const sdl = c;
 
-const SAMPLE_RATE = 22050;
+pub const SAMPLE_RATE = 22050;
 const SAMPLES_PER_TICK = 183; // 22050 / 120.49 ≈ 183 samples per note at speed 1
 const NUM_CHANNELS = 4;
 const MAX_FREQ = 65.41 * 38.055; // noteToFreq(63) ≈ 2489 Hz
@@ -143,6 +143,21 @@ pub const Audio = struct {
             return;
         }
         if (sfx_id < 0 or sfx_id >= 64) return;
+
+        // sfx(N, -2): release the loop of any channel currently playing
+        // SFX N. Carts pair this with sfx(N) to ensure a fresh start, and
+        // call sfx(N, -2) alone to STOP a loop without starting a new one.
+        // mansion_bros uses this for the vacuum sound: `sfx(1, -2)` when
+        // the player isn't holding O/X — without honoring it, the sound
+        // loops forever and we hear it as a constant drum beat.
+        if (channel_req == -2) {
+            for (0..NUM_CHANNELS) |i| {
+                if (self.channels[i].sfx_id == sfx_id) {
+                    self.releaseLoop(i);
+                }
+            }
+            return;
+        }
 
         // Find channel
         var ch: usize = undefined;
@@ -430,7 +445,7 @@ pub const Audio = struct {
                     ) * 0.7;
                 } else oscillate(child_wf, ch.inst_phase);
 
-                const inst_out = sample * combined_vol * 0.25;
+                const inst_out = sample * combined_vol * 0.5;
                 if (is_music_ch) {
                     music_mix += inst_out;
                 } else {
@@ -475,7 +490,10 @@ pub const Audio = struct {
                         1.0,
                     ) * 0.7;
                 } else oscillate(ch.waveform, ch.phase);
-                const ch_out = sample * ch.volume * 0.25;
+                // Per-channel scaling: 0.5 keeps 4 channels under +/-2 (clipped
+                // to +/-1 at the final mix). PICO-8/picolove output noticeably
+                // louder than ours did at 0.25, suggesting 0.5 is closer.
+                const ch_out = sample * ch.volume * 0.5;
                 if (is_music_ch) {
                     music_mix += ch_out;
                 } else {
@@ -553,9 +571,13 @@ pub const Audio = struct {
     fn advanceMusic(self: *Audio) void {
         if (self.music_state.pattern < 0) return;
 
-        // Check if ALL music channels are finished
+        // Check if ALL ACTIVE music channels are finished. Disabled channels
+        // (those with the 0x40 bit set in the pattern byte) were never
+        // started, so their `finished` flag stays false forever; treat them
+        // as already-done by skipping them.
         for (0..4) |ch_i| {
             if (self.music_state.channel_mask & (@as(u8, 1) << @intCast(ch_i)) == 0) continue;
+            if (self.channels[ch_i].sfx_id < 0) continue; // never started in this pattern
             if (!self.channels[ch_i].finished) return; // still playing
         }
 

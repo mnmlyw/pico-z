@@ -97,6 +97,24 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&web_install.step);
     }
 
+    // Headless cart runner — no SDL window/audio, scriptable input, PPM screenshots
+    const run_cart_mod = b.createModule(.{
+        .root_source_file = b.path("src/run_cart.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    run_cart_mod.addImport("zlua", zlua_dep.module("zlua"));
+    run_cart_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    const run_cart_exe = b.addExecutable(.{
+        .name = "run_cart",
+        .root_module = run_cart_mod,
+    });
+    b.installArtifact(run_cart_exe);
+    const run_cart_run = b.addRunArtifact(run_cart_exe);
+    if (b.args) |args| run_cart_run.addArgs(args);
+    const run_cart_step = b.step("run-cart", "Run the headless cart runner: zig build run-cart -- <cart> [script]");
+    run_cart_step.dependOn(&run_cart_run.step);
+
     // Tests
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),

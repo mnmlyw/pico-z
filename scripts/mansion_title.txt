@@ -1,0 +1,3 @@
+frames 240
+log mansion_log.txt
+180: screenshot title.bmp

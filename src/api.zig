@@ -47,6 +47,10 @@ pub const PicoState = struct {
     // Keyboard scancode state for stat(28)
     key_states: ?[*c]const bool = null,
     key_states_count: c_int = 0,
+
+    // Optional debug log sink — when set, printh() also appends here.
+    // Used by the headless cart runner. Lines are appended verbatim, no framing.
+    debug_log: ?*std.ArrayList(u8) = null,
 };
 
 pub fn getPico(lua: *zlua.Lua) *PicoState {
@@ -669,9 +673,14 @@ fn api_time(lua: *zlua.Lua) c_int {
 }
 
 fn api_printh(lua: *zlua.Lua) c_int {
-    _ = getPico(lua);
+    const pico = getPico(lua);
     const msg = lua.toString(1) catch "?";
     std.debug.print("{s}\n", .{msg});
+    if (pico.debug_log) |log| {
+        var buf: [512]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "f{d} printh: {s}\n", .{ pico.frame_count, msg }) catch return 0;
+        log.appendSlice(pico.allocator, line) catch {};
+    }
     return 0;
 }
 
@@ -784,11 +793,20 @@ fn api_serial(lua: *zlua.Lua) c_int {
 }
 
 fn api_flip(lua: *zlua.Lua) c_int {
-    // flip() is used by carts with manual frame loops (no _update/_draw).
-    // In our architecture, rendering happens in main loop, so this is a yield point.
-    // For coroutine-based game loops, yield to allow frame rendering.
+    // PICO-8 flip() blocks for one frame and presents the buffer. We only honor
+    // it when called from within a coroutine (yields to host). Carts also call
+    // flip() from inside _update/_draw to drive inline scene-transition
+    // animations (e.g. fade_in/fade_out) — there's no coroutine to yield to,
+    // so we no-op. The cart's state still progresses; the visual animation is
+    // just compressed into a single frame.
     _ = getPico(lua);
-    return lua.yield(0);
+    // pushThread returns true on the main thread (NOT yieldable). Pop after.
+    const is_main = lua.pushThread();
+    lua.pop(1);
+    if (!is_main) {
+        return lua.yield(0);
+    }
+    return 0;
 }
 
 fn api_reset(lua: *zlua.Lua) c_int {

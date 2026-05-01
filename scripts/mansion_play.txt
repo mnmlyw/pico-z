@@ -1,0 +1,17 @@
+# Drive both engines past title -> select -> gameplay, then sample the in-game
+# scene. The 6-on/6-off pulse cadence (handled by the BBS capture) keeps
+# btnp() seeing fresh edges even if cart timing drifts.
+frames 720
+log mansion_log.txt
+
+# Title -> select
+60: hold p0.x for 30
+# Select -> gameplay (long hold so the press lands during update_select after
+# fade-in completes)
+240: hold p0.x for 90
+
+# Sample gameplay
+420: screenshot play_a.bmp
+500: screenshot play_b.bmp
+600: screenshot play_c.bmp
+700: screenshot play_d.bmp

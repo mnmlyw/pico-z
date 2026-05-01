@@ -17,6 +17,12 @@ pub const LuaEngine = struct {
     allocator: std.mem.Allocator,
     pico: *api.PicoState,
     processed_source: ?[]const u8 = null,
+    // When the cart called flip() and the per-frame coroutine yielded, this
+    // holds the coroutine so we can resume it next tick. Null = next tick
+    // starts a fresh coroutine.
+    tick_co: ?*zlua.Lua = null,
+    // Registry ref to keep the active tick coroutine GC-anchored.
+    tick_co_ref: c_int = -1,
 
     pub fn init(allocator: std.mem.Allocator, pico: *api.PicoState) !LuaEngine {
         const lua = try zlua.Lua.init(allocator);
@@ -25,6 +31,19 @@ pub const LuaEngine = struct {
 
         api.registerAll(lua, pico);
         setupEnvFallback(lua);
+
+        // Install a Lua-defined per-frame tick body. Defined as a Lua function
+        // (not a C closure) so flip() inside the cart can yield through it —
+        // Lua 5.2 forbids yielding across non-yieldable C frames.
+        const tick_src =
+            \\function __pz_tick()
+            \\  if type(_update60) == "function" then _update60()
+            \\  elseif type(_update) == "function" then _update() end
+            \\  if type(_draw) == "function" then _draw() end
+            \\end
+        ;
+        lua.loadBuffer(tick_src, "__pz_tick", .text) catch return error.LuaLoadError;
+        lua.protectedCall(.{}) catch return error.LuaExecError;
 
         return LuaEngine{
             .lua = lua,
@@ -71,6 +90,9 @@ pub const LuaEngine = struct {
         if (self.has_init) {
             self.callGlobal("_init", true);
         }
+        // _init may install lifecycle hooks dynamically (e.g. start_title sets
+        // _update60 = update_title), so re-detect after running it.
+        self.refreshLifecycleFlags();
     }
 
     pub fn callUpdate(self: *LuaEngine) void {
@@ -79,18 +101,97 @@ pub const LuaEngine = struct {
 
     pub fn callUpdateWithLogging(self: *LuaEngine, log_runtime_errors: bool) void {
         if (self.had_error) return;
-        if (self.has_update60) {
+        if (self.hasGlobal("_update60")) {
             self.callGlobal("_update60", log_runtime_errors);
-        } else if (self.has_update) {
+        } else if (self.hasGlobal("_update")) {
             self.callGlobal("_update", log_runtime_errors);
         }
     }
 
     pub fn callDraw(self: *LuaEngine) void {
         if (self.had_error) return;
-        if (self.has_draw) {
+        if (self.hasGlobal("_draw")) {
             self.callGlobal("_draw", true);
         }
+    }
+
+    /// Result of a single coroutine-driven frame tick.
+    pub const TickResult = enum { done, yielded, errored };
+
+    /// Run one frame of cart code (update + draw) inside a Lua coroutine.
+    /// If the cart calls flip(), the coroutine yields and we return .yielded
+    /// — the caller should render the current screen and call tickFrame()
+    /// again next frame to resume from where the cart left off. When the
+    /// frame's full update + draw completes, returns .done.
+    pub fn tickFrame(self: *LuaEngine) TickResult {
+        if (self.had_error) return .errored;
+
+        // Resume an in-progress coroutine if one is live (cart yielded last tick).
+        if (self.tick_co) |co| {
+            return self.resumeTick(co, 0);
+        }
+
+        // Start a fresh coroutine. The thread is created from `self.lua`'s
+        // pool and shares the global state. We anchor it in the registry so
+        // it survives GC while we hold it across yields.
+        const co = self.lua.newThread();
+        self.tick_co_ref = self.lua.ref(zlua.registry_index) catch {
+            self.captureError();
+            return .errored;
+        };
+
+        // Push __pz_tick (a pure-Lua function) onto co's stack. Because it's
+        // Lua, not C, the inner flip()→yield can travel up through it.
+        const t = co.getGlobal("__pz_tick") catch zlua.LuaType.nil;
+        if (t != zlua.LuaType.function) {
+            co.pop(1);
+            self.releaseTickCo();
+            return .done; // no tick body installed (shouldn't happen post-init)
+        }
+        return self.resumeTick(co, 0);
+    }
+
+    fn resumeTick(self: *LuaEngine, co: *zlua.Lua, num_args: i32) TickResult {
+        const status = co.resumeThread(self.lua, num_args) catch {
+            // Capture error from the coroutine's stack
+            if (co.toString(-1)) |msg| {
+                const len = @min(msg.len, self.error_msg.len);
+                @memcpy(self.error_msg[0..len], msg[0..len]);
+                self.error_len = len;
+            } else |_| {
+                const m = "coroutine error";
+                @memcpy(self.error_msg[0..m.len], m);
+                self.error_len = m.len;
+            }
+            self.had_error = true;
+            self.releaseTickCo();
+            std.log.err("lua runtime error in tick: {s}", .{self.getErrorMsg()});
+            return .errored;
+        };
+        switch (status) {
+            .yield => {
+                self.tick_co = co;
+                return .yielded;
+            },
+            .ok => {
+                self.releaseTickCo();
+                return .done;
+            },
+        }
+    }
+
+    fn releaseTickCo(self: *LuaEngine) void {
+        self.tick_co = null;
+        if (self.tick_co_ref >= 0) {
+            self.lua.unref(zlua.registry_index, self.tick_co_ref);
+            self.tick_co_ref = -1;
+        }
+    }
+
+    fn refreshLifecycleFlags(self: *LuaEngine) void {
+        self.has_update60 = self.hasGlobal("_update60");
+        self.has_update = self.hasGlobal("_update");
+        self.has_draw = self.hasGlobal("_draw");
     }
 
     fn callGlobal(self: *LuaEngine, name: [:0]const u8, log_runtime_errors: bool) void {

@@ -9,3 +9,16 @@ dist/
 *.sav
 carts/
 .pico-z-cartdata/
+
+# Test harness artifacts
+bbs/
+ours/
+diff/
+*.bmp
+*.wav
+*.ppm
+mansion_log.txt
+
+# Local node deps for harness scripts
+tools/node_modules/
+tools/package-lock.json
