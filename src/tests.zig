@@ -2521,6 +2521,28 @@ test "top-level flip() loop presents frames and is abandoned on quit" {
     try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return _n"));
 }
 
+test "tickFrame runs _draw after resetVM (regression: __pz_tick reinstalled)" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try LuaEngine.init(testing.allocator, &pico);
+    defer lua_engine.deinit();
+
+    // The native loadCart wrapper resets the VM before loading; tickFrame must
+    // still drive _update/_draw afterward (the tick body must be reinstalled).
+    try lua_engine.resetVM();
+    const code = "function _draw() pset(5, 5, 9) end";
+    var cart = cart_mod.Cart{ .lua_code = try testing.allocator.dupe(u8, code), .allocator = testing.allocator };
+    defer cart.deinit();
+    try lua_engine.loadCart(&cart, testing.allocator);
+    lua_engine.callInit();
+
+    try testing.expectEqual(LuaEngine.TickResult.done, lua_engine.tickFrame());
+    try testing.expectEqual(@as(f64, 9), try evalLuaNumber(lua_engine.lua, "return pget(5, 5)"));
+}
+
 // ══════════════════════════════════════════════════
 // SFX note format in memory
 // ══════════════════════════════════════════════════

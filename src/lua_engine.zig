@@ -43,10 +43,21 @@ pub const LuaEngine = struct {
 
         api.registerAll(lua, pico);
         setupEnvFallback(lua);
+        try installTickBody(lua);
 
-        // Install a Lua-defined per-frame tick body. Defined as a Lua function
-        // (not a C closure) so flip() inside the cart can yield through it —
-        // Lua 5.2 forbids yielding across non-yieldable C frames.
+        return LuaEngine{
+            .lua = lua,
+            .allocator = allocator,
+            .pico = pico,
+        };
+    }
+
+    /// Install the Lua-defined per-frame tick body that tickFrame() resumes.
+    /// Defined as a Lua function (not a C closure) so flip() inside the cart can
+    /// yield through it — Lua 5.2 forbids yielding across non-yieldable C
+    /// frames. MUST be reinstalled after every VM reset (resetVM), since the
+    /// tick body lives in the Lua global table which a reset discards.
+    fn installTickBody(lua: *zlua.Lua) !void {
         const tick_src =
             \\function __pz_tick()
             \\  if type(_update60) == "function" then _update60()
@@ -56,12 +67,6 @@ pub const LuaEngine = struct {
         ;
         lua.loadBuffer(tick_src, "__pz_tick", .text) catch return error.LuaLoadError;
         lua.protectedCall(.{}) catch return error.LuaExecError;
-
-        return LuaEngine{
-            .lua = lua,
-            .allocator = allocator,
-            .pico = pico,
-        };
     }
 
     pub fn deinit(self: *LuaEngine) void {
@@ -409,6 +414,9 @@ pub const LuaEngine = struct {
         sandboxGlobals(self.lua);
         api.registerAll(self.lua, self.pico);
         setupEnvFallback(self.lua);
+        // Reinstall the tick body — tickFrame() resumes __pz_tick, which the VM
+        // reset just discarded. Without this the cart never updates or draws.
+        try installTickBody(self.lua);
 
         // The old Lua registry (and every menuitem callback ref it held) is now
         // gone — drop the stale pause-menu entries.
