@@ -820,27 +820,57 @@ fn printText(pico: *api_mod.PicoState, lua: *zlua.Lua, text: []const u8) i32 {
     var right_x: i32 = undefined;
     if (lua.isNoneOrNil(2)) {
         // print(str): use cursor position, default color
-        const cx: i32 = pico.memory.ram[mem_const.ADDR_CURSOR_X];
-        const cy: i32 = pico.memory.ram[mem_const.ADDR_CURSOR_Y];
         const col: u4 = @truncate(pico.memory.ram[mem_const.ADDR_COLOR] & 0x0F);
-        right_x = drawText(pico.memory, text, cx, cy, col);
-        pico.memory.ram[mem_const.ADDR_CURSOR_Y] = @truncate(@as(u32, @bitCast(cy + 6)) & 0xFF);
+        right_x = printAtCursor(pico.memory, text, col);
     } else if (lua.isNoneOrNil(3)) {
         // print(str, col): use cursor position with color
-        const cx: i32 = pico.memory.ram[mem_const.ADDR_CURSOR_X];
-        const cy: i32 = pico.memory.ram[mem_const.ADDR_CURSOR_Y];
         const col = getColor(pico.memory, lua, 2);
-        right_x = drawText(pico.memory, text, cx, cy, col);
-        pico.memory.ram[mem_const.ADDR_CURSOR_Y] = @truncate(@as(u32, @bitCast(cy + 6)) & 0xFF);
+        right_x = printAtCursor(pico.memory, text, col);
     } else {
-        // print(str, x, y, [col])
+        // print(str, x, y, [col]): explicit position — no cursor advance, no scroll
         const x = luaToInt(lua, 2);
         const y = luaToInt(lua, 3);
         const col = getColor(pico.memory, lua, 4);
-        right_x = drawText(pico.memory, text, x, y, col);
+        right_x = drawText(pico.memory, text, x, y, col).right_x;
     }
     lua.pushNumber(@floatFromInt(right_x));
     return 1;
+}
+
+/// Cursor-mode print: draws at the cursor, advances cursor_y by the line
+/// height, and scrolls the screen up when text reaches the bottom (unless
+/// disabled via bit 6 of 0x5F36). Mirrors PICO-8's retro scrolling console.
+fn printAtCursor(memory: *Memory, text: []const u8, col: u4) i32 {
+    const cx: i32 = memory.ram[mem_const.ADDR_CURSOR_X];
+    var cy: i32 = memory.ram[mem_const.ADDR_CURSOR_Y];
+
+    // Scroll up before drawing if the cursor sits below the bottom line
+    // (y > 122). poke(0x5F36, 0x40) disables this.
+    const scroll_enabled = (memory.ram[0x5F36] & 0x40) == 0;
+    if (scroll_enabled and cy > 122) {
+        scrollScreenUp(memory, cy - 122);
+        cy = 122;
+    }
+
+    const r = drawText(memory, text, cx, cy, col);
+    memory.ram[mem_const.ADDR_CURSOR_Y] = @truncate(@as(u32, @bitCast(r.next_y)) & 0xFF);
+    return r.right_x;
+}
+
+/// Shift the screen buffer up by `pixels` rows, filling the exposed bottom
+/// with color 0. Operates on raw screen memory (honors the 0x5F55 screen
+/// page) and ignores camera/clip, matching PICO-8's scroll behavior.
+fn scrollScreenUp(memory: *Memory, pixels: i32) void {
+    if (pixels <= 0) return;
+    const base: usize = memory.screenBase();
+    const total: usize = 0x2000; // 128 rows * 64 bytes
+    const end: usize = @min(base + total, mem_const.RAM_SIZE);
+    const avail: usize = end - base;
+    const shift: usize = @min(@as(usize, @intCast(pixels)) * 64, avail);
+    if (shift < avail) {
+        std.mem.copyForwards(u8, memory.ram[base .. base + (avail - shift)], memory.ram[base + shift .. base + avail]);
+    }
+    @memset(memory.ram[base + (avail - shift) .. base + avail], 0);
 }
 
 fn parseHexColor(c: u8) u4 {
@@ -854,16 +884,66 @@ fn parseHexColor(c: u8) u4 {
         c & 0x0f);
 }
 
-fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: u4) i32 {
+/// Per-print text attributes. PICO-8 resets these at the start of every
+/// print() call to the defaults held in 0x5F58..0x5F5B; control codes within
+/// the string may then mutate them.
+const FontAttrs = struct {
+    use_custom: bool,
+    char_w: i32, // advance width for chars < 0x80
+    char_h: i32, // line height
+    char_w2: i32, // advance width for chars >= 0x80 (custom font)
+    tab_w: i32,
+    offset_x: i32, // custom-glyph pixel offset
+    offset_y: i32,
+
+    fn compute(memory: *const Memory, use_custom: bool) FontAttrs {
+        if (!use_custom) {
+            // Built-in 4x6 font.
+            return .{ .use_custom = false, .char_w = 4, .char_h = 6, .char_w2 = 4, .tab_w = 16, .offset_x = 0, .offset_y = 0 };
+        }
+        // Custom font metrics from the attribute registers.
+        const f59 = memory.ram[0x5F59];
+        const f5a = memory.ram[0x5F5A];
+        const f5b = memory.ram[0x5F5B];
+        var cw: i32 = @as(i32, f59 & 0x0F);
+        var chh: i32 = @as(i32, (f59 >> 4) & 0x0F);
+        var cw2: i32 = @as(i32, f5a & 0x0F);
+        var tw: i32 = @as(i32, (f5a >> 4) & 0x0F);
+        if (cw == 0) cw = 8;
+        if (chh == 0) chh = 8;
+        if (cw2 == 0) cw2 = cw;
+        if (tw == 0) tw = cw;
+        return .{
+            .use_custom = true,
+            .char_w = cw,
+            .char_h = chh,
+            .char_w2 = cw2,
+            .tab_w = tw,
+            .offset_x = @as(i32, f5b & 0x0F),
+            .offset_y = @as(i32, (f5b >> 4) & 0x0F),
+        };
+    }
+
+    fn advance(self: FontAttrs, ch: u8) i32 {
+        return if (self.use_custom and ch >= 0x80) self.char_w2 else self.char_w;
+    }
+};
+
+const DrawTextResult = struct {
+    right_x: i32, // rightmost x reached (PICO-8 print return value)
+    next_y: i32, // cursor y for the following line (cursor space)
+};
+
+fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: u4) DrawTextResult {
     const cam = getCamera(memory);
     var x = start_x - cam.x;
     var y = start_y - cam.y;
     var color = col;
-    var char_w: i32 = 4;
-    var char_h: i32 = 6;
+    // Initialize attributes from the registers; bit 0x80 of 0x5F58 selects the
+    // custom font by default. Control codes \014/\015 toggle it mid-string.
+    var fa = FontAttrs.compute(memory, (memory.ram[0x5F58] & 0x80) != 0);
     var home_x: i32 = x;
     var home_y: i32 = y;
-    var tab_w: i32 = 16;
     var i: usize = 0;
     while (i < text.len) {
         const ch = text[i];
@@ -874,9 +954,10 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                     const count = text[i];
                     const rch = text[i + 1];
                     i += 2;
+                    const adv = fa.advance(rch);
                     for (0..count) |_| {
-                        drawChar(memory, rch, x, y, color);
-                        x += char_w;
+                        drawGlyph(memory, rch, x, y, color, fa);
+                        x += adv;
                     }
                 }
             },
@@ -886,7 +967,7 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                     const oy: i32 = @as(i32, @as(i8, @bitCast(text[i + 1])));
                     const dch = text[i + 2];
                     i += 3;
-                    drawChar(memory, dch, x + ox, y + oy, color);
+                    drawGlyph(memory, dch, x + ox, y + oy, color, fa);
                 }
             },
             0x03 => { // \- move cursor horizontally
@@ -913,12 +994,12 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                     const cmd = text[i];
                     i += 1;
                     switch (cmd) {
-                        'w', '-' + 128 => char_w = if (char_w == 8) 4 else 8, // wide mode toggle (\^w / \^-w)
-                        't' => char_h = if (char_h == 12) 6 else 12, // tall mode toggle
+                        'w', '-' + 128 => fa.char_w = if (fa.char_w == 8) 4 else 8, // wide mode toggle (\^w / \^-w)
+                        't' => fa.char_h = if (fa.char_h == 12) 6 else 12, // tall mode toggle
                         '=' => {}, // stripey mode (cosmetic, skip)
                         'p' => { // pinball = wide + tall + stripey
-                            char_w = 8;
-                            char_h = 12;
+                            fa.char_w = 8;
+                            fa.char_h = 12;
                         },
                         'i' => {}, // invert (skip for now)
                         'b' => {}, // border toggle (skip)
@@ -957,33 +1038,34 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                         },
                         's' => { // \^s N — set tab stop width
                             if (i < text.len) {
-                                tab_w = @max(@as(i32, text[i]), 1);
+                                fa.tab_w = @max(@as(i32, text[i]), 1);
                                 i += 1;
                             }
                         },
                         'x' => { // \^x N — set character width
                             if (i < text.len) {
-                                char_w = @as(i32, text[i]);
+                                fa.char_w = @as(i32, text[i]);
                                 i += 1;
                             }
                         },
                         'y' => { // \^y N — set character height
                             if (i < text.len) {
-                                char_h = @as(i32, text[i]);
+                                fa.char_h = @as(i32, text[i]);
                                 i += 1;
                             }
                         },
+                        '@' => fa = FontAttrs.compute(memory, true), // \^@ — use custom font
                         '1'...'9' => {}, // skip frames (animation delay, ignore)
                         else => {},
                     }
                 }
             },
             0x00 => break, // \0 terminate string
-            0x08 => x -= char_w, // \b backspace
-            0x09 => x = @divTrunc(x, tab_w) * tab_w + tab_w, // \t tab
+            0x08 => x -= fa.char_w, // \b backspace
+            0x09 => x = @divTrunc(x, fa.tab_w) * fa.tab_w + fa.tab_w, // \t tab
             0x0a => { // \n newline
                 x = start_x - cam.x;
-                y += char_h;
+                y += fa.char_h;
             },
             0x0c => { // \f set foreground color (next byte is hex char '0'-'f')
                 if (i < text.len) {
@@ -992,15 +1074,15 @@ fn drawText(memory: *Memory, text: []const u8, start_x: i32, start_y: i32, col: 
                 }
             },
             0x0d => x = start_x - cam.x, // \r carriage return
-            0x0e => char_w = 8, // switch to wide font
-            0x0f => char_w = 4, // switch to normal font
+            0x0e => fa = FontAttrs.compute(memory, true), // \014 — switch to custom font
+            0x0f => fa = FontAttrs.compute(memory, false), // \015 — switch to built-in font
             else => {
-                drawChar(memory, ch, x, y, color);
-                x += char_w;
+                drawGlyph(memory, ch, x, y, color, fa);
+                x += fa.advance(ch);
             },
         }
     }
-    return x + cam.x;
+    return .{ .right_x = x + cam.x, .next_y = y + cam.y + fa.char_h };
 }
 
 fn drawChar(memory: *Memory, code: u8, x: i32, y: i32, col: u4) void {
@@ -1010,6 +1092,27 @@ fn drawChar(memory: *Memory, code: u8, x: i32, y: i32, col: u4) void {
         while (px < 4) : (px += 1) {
             if (font.getPixel(code, px, py)) {
                 putPixelNoCam(memory, x + px, y + py, col);
+            }
+        }
+    }
+}
+
+/// Draw a single glyph: from the custom font at 0x5600 (8x8, bit 0 = leftmost
+/// pixel) when the custom font is active, otherwise the built-in 4x6 font.
+fn drawGlyph(memory: *Memory, code: u8, x: i32, y: i32, col: u4, fa: FontAttrs) void {
+    if (!fa.use_custom) {
+        drawChar(memory, code, x, y, col);
+        return;
+    }
+    const base: u16 = 0x5600 +% @as(u16, code) *% 8;
+    var ry: u4 = 0;
+    while (ry < 8) : (ry += 1) {
+        const row_byte = memory.ram[base +% @as(u16, ry)];
+        if (row_byte == 0) continue;
+        var rx: u4 = 0;
+        while (rx < 8) : (rx += 1) {
+            if ((row_byte >> @as(u3, @intCast(rx))) & 1 != 0) {
+                putPixelNoCam(memory, x + fa.offset_x + @as(i32, rx), y + fa.offset_y + @as(i32, ry), col);
             }
         }
     }

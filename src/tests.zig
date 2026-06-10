@@ -7,6 +7,8 @@ const api = @import("api.zig");
 const audio_mod = @import("audio.zig");
 const input_mod = @import("input.zig");
 const LuaEngine = @import("lua_engine.zig").LuaEngine;
+const pause_menu = @import("pause_menu.zig");
+const cart_mod = @import("cart.zig");
 const main_mod = @import("main.zig");
 const save_state = @import("save_state.zig");
 const c = audio_mod.sdl;
@@ -2244,6 +2246,279 @@ test "print with backspace \\b moves cursor back" {
     // \b (0x08) moves cursor back 4 pixels
     const backspace_x = try evalLuaNumber(lua_engine.lua, "return print('a\\x08', 0, 0, 7)");
     try testing.expectEqual(@as(f64, 0), backspace_x);
+}
+
+test "print scrolls screen up when cursor reaches bottom" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // Mark a pixel at y=100, then print with the cursor at y=128 (below the
+    // 122 scroll threshold). The screen should scroll up by 128-122=6 pixels,
+    // moving the marker from y=100 to y=94.
+    try runLua(lua_engine.lua, "cls(0) pset(10,100,7) cursor(0,128) print('x')");
+    try testing.expectEqual(@as(f64, 7), try evalLuaNumber(lua_engine.lua, "return pget(10,94)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return pget(10,100)"));
+}
+
+test "print scroll disabled via 0x5f36 bit 6" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // poke(0x5f36, 0x40) disables auto-scroll — marker must stay at y=100.
+    try runLua(lua_engine.lua, "cls(0) poke(0x5f36,0x40) pset(10,100,7) cursor(0,128) print('x')");
+    try testing.expectEqual(@as(f64, 7), try evalLuaNumber(lua_engine.lua, "return pget(10,100)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return pget(10,94)"));
+}
+
+test "custom font renders from 0x5600" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // Enable custom font (0x80) with char_w=8, char_h=8. Define glyph 'A' (65):
+    // row 0 = all 8 pixels (0xff), row 1 = leftmost pixel only (0x01, bit 0).
+    try runLua(lua_engine.lua,
+        \\cls(0)
+        \\poke(0x5f58, 0x80)
+        \\poke(0x5f59, 0x88)
+        \\poke(0x5600 + 65*8 + 0, 0xff)
+        \\poke(0x5600 + 65*8 + 1, 0x01)
+        \\print("A", 0, 0, 7)
+    );
+    // Row 0: leftmost (bit 0) and rightmost (bit 7) pixels both set.
+    try testing.expectEqual(@as(f64, 7), try evalLuaNumber(lua_engine.lua, "return pget(0,0)"));
+    try testing.expectEqual(@as(f64, 7), try evalLuaNumber(lua_engine.lua, "return pget(7,0)"));
+    // Row 1: only the leftmost pixel is set.
+    try testing.expectEqual(@as(f64, 7), try evalLuaNumber(lua_engine.lua, "return pget(0,1)"));
+    try testing.expectEqual(@as(f64, 0), try evalLuaNumber(lua_engine.lua, "return pget(1,1)"));
+}
+
+test "custom font toggled mid-string via chr(14)/chr(15)" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // Custom font NOT enabled by default (0x5f58 bit 0x80 clear), but \014
+    // switches it on mid-string and \015 switches back to the built-in font.
+    // char_w=8 so the custom 'A' advances 8px; verify advance width.
+    try runLua(lua_engine.lua, "poke(0x5f59,0x88) poke(0x5600+65*8,0xff)");
+    // "\014A" → custom 'A' (code 65 < 0x80) advances by char_w = 8.
+    const cust_x = try evalLuaNumber(lua_engine.lua, "return print('\\14A', 0, 0, 7)");
+    try testing.expectEqual(@as(f64, 8), cust_x);
+    // "\015A" → built-in 'A' advances by 4.
+    const builtin_x = try evalLuaNumber(lua_engine.lua, "return print('\\15A', 0, 0, 7)");
+    try testing.expectEqual(@as(f64, 4), builtin_x);
+}
+
+test "menuitem registers, replaces, and removes items" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "menuitem(1, 'hello', function() end)");
+    try testing.expect(pico.menu_items[0].active);
+    try testing.expectEqualStrings("hello", pico.menu_items[0].label());
+    // Replace the label.
+    try runLua(lua_engine.lua, "menuitem(1, 'world')");
+    try testing.expectEqualStrings("world", pico.menu_items[0].label());
+    // menuitem(idx) with no label removes the item.
+    try runLua(lua_engine.lua, "menuitem(1)");
+    try testing.expect(!pico.menu_items[0].active);
+}
+
+test "extcmd pause/reset/shutdown set host requests" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    try runLua(lua_engine.lua, "extcmd('pause')");
+    try testing.expect(pico.menu_open);
+    try runLua(lua_engine.lua, "extcmd('reset')");
+    try testing.expect(pico.request_reset);
+    try runLua(lua_engine.lua, "extcmd('shutdown')");
+    try testing.expect(pico.request_shutdown);
+}
+
+test "pause menu invokes custom item callback and honors return value" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    // Slot 1 keeps the menu open (returns true); slot 2 closes it (returns nil).
+    try runLua(lua_engine.lua,
+        \\_fired = -1
+        \\menuitem(1, 'keep', function(b) _fired = b return true end)
+        \\menuitem(2, 'close', function(b) _fired = b end)
+    );
+    pico.menu_open = true;
+    // Entries: [continue(0), keep(1), close(2), reset(3)]. Select "keep".
+    pico.menu_sel = 1;
+    input.btn_state[0] = 0x10; // O pressed
+    input.prev_state[0] = 0;
+    const a1 = pause_menu.update(&pico, &input, lua_engine.lua);
+    try testing.expectEqual(pause_menu.Action.none, a1); // returned true → stays open
+    try testing.expectEqual(@as(f64, 0x10), try evalLuaNumber(lua_engine.lua, "return _fired"));
+    // Select "close" and press X — callback returns nil → menu closes.
+    pico.menu_sel = 2;
+    input.prev_state[0] = 0;
+    input.btn_state[0] = 0x20; // X pressed
+    const a2 = pause_menu.update(&pico, &input, lua_engine.lua);
+    try testing.expectEqual(pause_menu.Action.close, a2);
+    try testing.expectEqual(@as(f64, 0x20), try evalLuaNumber(lua_engine.lua, "return _fired"));
+}
+
+test "pause menu reset/continue built-in entries" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try initTestLuaEngine(&pico, "");
+    defer lua_engine.deinit();
+    pico.menu_open = true;
+    // No custom items: entries are [continue(0), reset(1)].
+    pico.menu_sel = 0;
+    input.prev_state[0] = 0;
+    input.btn_state[0] = 0x10; // O on "continue"
+    try testing.expectEqual(pause_menu.Action.close, pause_menu.update(&pico, &input, lua_engine.lua));
+    pico.menu_sel = 1;
+    input.prev_state[0] = 0;
+    input.btn_state[0] = 0x10; // O on "reset cart"
+    try testing.expectEqual(pause_menu.Action.reset, pause_menu.update(&pico, &input, lua_engine.lua));
+}
+
+test "flip() inside _init completes and presents each frame" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    const src =
+        \\_n = 0
+        \\function _init()
+        \\  for i=1,3 do _n = _n + 1 flip() end
+        \\end
+    ;
+    var lua_engine = try initTestLuaEngine(&pico, src);
+    defer lua_engine.deinit();
+
+    var present_calls: u32 = 0;
+    const Hook = struct {
+        fn call(ctx: *anyopaque) bool {
+            const p: *u32 = @ptrCast(@alignCast(ctx));
+            p.* += 1;
+            return true;
+        }
+    };
+    lua_engine.present_hook = .{ .ctx = @ptrCast(&present_calls), .call = Hook.call };
+
+    lua_engine.callInit();
+    // _init ran to completion despite the flips, and each flip presented once.
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return _n"));
+    try testing.expectEqual(@as(u32, 3), present_calls);
+}
+
+test "flip-driven loop in _init is abandoned when host quits" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    const src =
+        \\_n = 0
+        \\function _init()
+        \\  while true do _n = _n + 1 flip() end
+        \\end
+    ;
+    var lua_engine = try initTestLuaEngine(&pico, src);
+    defer lua_engine.deinit();
+
+    // Present hook returns false on the 2nd call (host wants to quit).
+    var present_calls: u32 = 0;
+    const Hook = struct {
+        fn call(ctx: *anyopaque) bool {
+            const p: *u32 = @ptrCast(@alignCast(ctx));
+            p.* += 1;
+            return p.* < 2;
+        }
+    };
+    lua_engine.present_hook = .{ .ctx = @ptrCast(&present_calls), .call = Hook.call };
+
+    // Must return (not hang) even though the cart loops forever.
+    lua_engine.callInit();
+    try testing.expectEqual(@as(u32, 2), present_calls);
+    try testing.expectEqual(@as(f64, 2), try evalLuaNumber(lua_engine.lua, "return _n"));
+    try testing.expect(!lua_engine.had_error);
+}
+
+test "loadCart runs top-level chunk and detects lifecycle functions" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try LuaEngine.init(testing.allocator, &pico);
+    defer lua_engine.deinit();
+
+    const code = "x = 42 function _init() end function _update() end function _draw() end";
+    var cart = cart_mod.Cart{ .lua_code = try testing.allocator.dupe(u8, code), .allocator = testing.allocator };
+    defer cart.deinit();
+    try lua_engine.loadCart(&cart, testing.allocator);
+    try testing.expect(lua_engine.has_init);
+    try testing.expect(lua_engine.has_update);
+    try testing.expect(lua_engine.has_draw);
+    try testing.expectEqual(@as(f64, 42), try evalLuaNumber(lua_engine.lua, "return x"));
+}
+
+test "top-level flip() loop presents frames and is abandoned on quit" {
+    var memory = Memory.init();
+    memory.initDrawState();
+    var input = input_mod.Input{};
+    var pixel_buffer = [_]u32{0} ** (api.SCREEN_W * api.SCREEN_H);
+    var pico = makeTestPico(&memory, &input, &pixel_buffer);
+    var lua_engine = try LuaEngine.init(testing.allocator, &pico);
+    defer lua_engine.deinit();
+
+    var present_calls: u32 = 0;
+    const Hook = struct {
+        fn call(ctx: *anyopaque) bool {
+            const p: *u32 = @ptrCast(@alignCast(ctx));
+            p.* += 1;
+            return p.* < 3; // host quits after 3 frames
+        }
+    };
+    lua_engine.present_hook = .{ .ctx = @ptrCast(&present_calls), .call = Hook.call };
+
+    const code = "_n = 0 while true do _n = _n + 1 flip() end";
+    var cart = cart_mod.Cart{ .lua_code = try testing.allocator.dupe(u8, code), .allocator = testing.allocator };
+    defer cart.deinit();
+    // Must return rather than hang on the infinite loop.
+    try lua_engine.loadCart(&cart, testing.allocator);
+    try testing.expectEqual(@as(u32, 3), present_calls);
+    try testing.expectEqual(@as(f64, 3), try evalLuaNumber(lua_engine.lua, "return _n"));
 }
 
 // ══════════════════════════════════════════════════

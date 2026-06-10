@@ -12,6 +12,20 @@ const cartdata_store = @import("cartdata_store.zig");
 pub const SCREEN_W = 128;
 pub const SCREEN_H = 128;
 
+/// A custom pause-menu entry registered via menuitem(). The callback is held
+/// as a Lua registry ref (cb_ref) so the host loop can invoke it when the
+/// player selects the item.
+pub const MenuItem = struct {
+    label_buf: [32]u8 = undefined,
+    label_len: u8 = 0,
+    cb_ref: i32 = -1, // Lua registry ref, or -1 if none
+    active: bool = false,
+
+    pub fn label(self: *const MenuItem) []const u8 {
+        return self.label_buf[0..self.label_len];
+    }
+};
+
 pub const PicoState = struct {
     memory: *Memory,
     pixel_buffer: *[SCREEN_W * SCREEN_H]u32,
@@ -51,6 +65,17 @@ pub const PicoState = struct {
     // Optional debug log sink — when set, printh() also appends here.
     // Used by the headless cart runner. Lines are appended verbatim, no framing.
     debug_log: ?*std.ArrayList(u8) = null,
+
+    // Pause menu: custom items registered via menuitem(), plus open/selection
+    // state. Driven by the host loop (pause_menu.zig).
+    menu_items: [5]MenuItem = [_]MenuItem{.{}} ** 5,
+    menu_open: bool = false,
+    menu_sel: u8 = 0,
+
+    // One-shot requests raised by extcmd()/the pause menu, consumed by the host
+    // loop: reset reloads the current cart; shutdown quits.
+    request_reset: bool = false,
+    request_shutdown: bool = false,
 };
 
 pub fn getPico(lua: *zlua.Lua) *PicoState {
@@ -208,6 +233,9 @@ pub fn prepareForCartLoad(pico: *PicoState) void {
     pico.line_x = 0;
     pico.line_y = 0;
     pico.line_valid = false;
+    // Custom menu items reference Lua callbacks from the cart we're leaving;
+    // drop them before the VM is reset.
+    clearMenu(pico);
 }
 
 pub fn flushCartdata(pico: *PicoState) void {
@@ -738,11 +766,68 @@ fn api_dset(lua: *zlua.Lua) c_int {
     return 0;
 }
 
-fn api_menuitem(_: *zlua.Lua) c_int {
+/// Reset all custom pause-menu items. Called around VM reset (cart load): the
+/// Lua registry — and thus every cb_ref — is about to be destroyed, so we drop
+/// the refs without unref'ing them.
+pub fn clearMenu(pico: *PicoState) void {
+    for (&pico.menu_items) |*item| {
+        item.* = .{};
+    }
+    pico.menu_open = false;
+    pico.menu_sel = 0;
+    pico.request_reset = false;
+    pico.request_shutdown = false;
+}
+
+// menuitem(index, [label], [callback]) — register/replace/remove a pause-menu
+// entry in slot 1..5. Passing no label removes the entry. The callback is
+// stored as a registry ref and invoked by the host loop when selected.
+fn api_menuitem(lua: *zlua.Lua) c_int {
+    const pico = getPico(lua);
+    const idx = optInt(lua, 1, 0);
+    if (idx < 1 or idx > 5) return 0;
+    const slot = &pico.menu_items[@intCast(idx - 1)];
+
+    // Drop any previous callback ref for this slot (same VM — safe to unref).
+    if (slot.cb_ref != -1) {
+        lua.unref(zlua.registry_index, slot.cb_ref);
+        slot.cb_ref = -1;
+    }
+
+    // No label (nil/none) → remove the item.
+    if (lua.isNoneOrNil(2)) {
+        slot.* = .{};
+        return 0;
+    }
+
+    const label = lua.toString(2) catch "";
+    const n = @min(label.len, slot.label_buf.len);
+    @memcpy(slot.label_buf[0..n], label[0..n]);
+    slot.label_len = @intCast(n);
+
+    if (lua.isFunction(3)) {
+        lua.pushValue(3);
+        slot.cb_ref = lua.ref(zlua.registry_index) catch -1;
+    }
+    slot.active = true;
     return 0;
 }
 
-fn api_extcmd(_: *zlua.Lua) c_int {
+// extcmd(cmd) — host commands. We support the ones meaningful for a standalone
+// player; capture/recording/title commands are accepted as no-ops.
+fn api_extcmd(lua: *zlua.Lua) c_int {
+    const pico = getPico(lua);
+    const cmd = lua.toString(1) catch return 0;
+    if (std.mem.eql(u8, cmd, "pause")) {
+        pico.menu_open = true;
+        pico.menu_sel = 0;
+    } else if (std.mem.eql(u8, cmd, "reset")) {
+        pico.request_reset = true;
+    } else if (std.mem.eql(u8, cmd, "shutdown")) {
+        pico.request_shutdown = true;
+    }
+    // go_back/label/screen/rec/video/audio_rec/folder/set_title/set_filename/
+    // breadcrumb: no-ops (no cart history, recording, or editor in the player).
     return 0;
 }
 

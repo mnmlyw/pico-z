@@ -11,12 +11,49 @@ const input_mod = @import("input.zig");
 const audio_mod = @import("audio.zig");
 const save_state = @import("save_state.zig");
 const cartdata_store = @import("cartdata_store.zig");
+const pause_menu = @import("pause_menu.zig");
 
 const SCREEN_W = 128;
 const SCREEN_H = 128;
 const WINDOW_SCALE = 4;
 const WINDOW_W = SCREEN_W * WINDOW_SCALE;
 const WINDOW_H = SCREEN_H * WINDOW_SCALE;
+
+// Context for the LuaEngine present hook: lets flip() inside _init run a full
+// host frame (events + input + present) so loading screens, intro fades, and
+// flip-driven main loops work. Returns false when the host wants to quit.
+const PresentCtx = struct {
+    memory: *Memory,
+    pixel_buffer: *[SCREEN_W * SCREEN_H]u32,
+    renderer: *c.SDL_Renderer,
+    texture: *c.SDL_Texture,
+    input: *input_mod.Input,
+    running: *bool,
+    io: std.Io,
+};
+
+fn presentFrame(ctx_opaque: *anyopaque) bool {
+    const ctx: *PresentCtx = @ptrCast(@alignCast(ctx_opaque));
+    // Pump events so the window stays responsive and closable during a
+    // flip-driven loop. Quit/Escape stop the host.
+    var event: c.SDL_Event = undefined;
+    while (c.SDL_PollEvent(&event)) {
+        if (event.type == c.SDL_EVENT_QUIT) ctx.running.* = false;
+        if (event.type == c.SDL_EVENT_KEY_DOWN and event.key.key == c.SDLK_ESCAPE) ctx.running.* = false;
+    }
+    // Refresh input so flip-driven loops read live button state.
+    ctx.input.update();
+    ctx.memory.ram[0x5F4C] = ctx.input.btn_state[0];
+    ctx.memory.ram[0x5F4D] = ctx.input.btn_state[1];
+    gfx.renderToARGB(ctx.memory, ctx.pixel_buffer);
+    _ = c.SDL_UpdateTexture(ctx.texture, null, ctx.pixel_buffer, SCREEN_W * @sizeOf(u32));
+    _ = c.SDL_RenderClear(ctx.renderer);
+    _ = c.SDL_RenderTexture(ctx.renderer, ctx.texture, null, null);
+    _ = c.SDL_RenderPresent(ctx.renderer);
+    // flip() during _init runs at PICO-8's default 30fps.
+    ctx.io.sleep(.fromNanoseconds(1_000_000_000 / 30), .awake) catch {};
+    return ctx.running.*;
+}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -98,6 +135,20 @@ pub fn main(init: std.process.Init) !void {
     var lua_engine = try LuaEngine.init(allocator, &pico);
     defer lua_engine.deinit();
 
+    var running = true;
+
+    // Let flip() inside _init run a full host frame (events + input + present).
+    var present_ctx = PresentCtx{
+        .memory = &memory,
+        .pixel_buffer = &pixel_buffer,
+        .renderer = renderer,
+        .texture = texture,
+        .input = &input,
+        .running = &running,
+        .io = io,
+    };
+    lua_engine.present_hook = .{ .ctx = @ptrCast(&present_ctx), .call = presentFrame };
+
     var current_cart_path: ?[]const u8 = cart_path;
     var owned_cart_path: ?[]u8 = null;
     defer if (owned_cart_path) |p| allocator.free(p);
@@ -110,7 +161,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Main loop
-    var running = true;
     var frame_overran = false;
 
     while (running) {
@@ -125,6 +175,11 @@ pub fn main(init: std.process.Init) !void {
             if (event.type == c.SDL_EVENT_QUIT) running = false;
             if (event.type == c.SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == c.SDLK_ESCAPE) running = false;
+                if (event.key.key == c.SDLK_RETURN) {
+                    // Enter toggles the PICO-8 pause menu.
+                    pico.menu_open = !pico.menu_open;
+                    pico.menu_sel = 0;
+                }
                 if (event.key.key == c.SDLK_P) {
                     if (current_cart_path) |path| {
                         if (save_state.saveState(&pico, &lua_engine, path)) |_| {
@@ -175,6 +230,10 @@ pub fn main(init: std.process.Init) !void {
                 input.deinitControllers();
                 input.initControllers();
             }
+            if (event.type == c.SDL_EVENT_GAMEPAD_BUTTON_DOWN and event.gbutton.button == c.SDL_GAMEPAD_BUTTON_START) {
+                pico.menu_open = !pico.menu_open;
+                pico.menu_sel = 0;
+            }
             if (event.type == c.SDL_EVENT_MOUSE_MOTION) {
                 var lx: f32 = event.motion.x;
                 var ly: f32 = event.motion.y;
@@ -213,14 +272,40 @@ pub fn main(init: std.process.Init) !void {
         pico.key_states = c.SDL_GetKeyboardState(&numkeys);
         pico.key_states_count = numkeys;
 
-        // Run cart — at 30fps, if previous frame overran, call _update twice
-        // (only when not in mid-flip, to avoid skipping flip-paced animation).
-        if (frame_overran and !lua_engine.use60fps() and lua_engine.tick_co == null) {
-            lua_engine.callUpdate();
+        if (pico.menu_open) {
+            // Pause menu is up: the cart is frozen. Drive menu navigation
+            // instead of ticking the cart.
+            switch (pause_menu.update(&pico, &input, lua_engine.lua)) {
+                .none => {},
+                .close => pico.menu_open = false,
+                .reset => {
+                    pico.menu_open = false;
+                    pico.request_reset = true;
+                },
+                .shutdown => running = false,
+            }
+        } else {
+            // Run cart — at 30fps, if previous frame overran, call _update twice
+            // (only when not in mid-flip, to avoid skipping flip-paced animation).
+            if (frame_overran and !lua_engine.use60fps() and lua_engine.tick_co == null) {
+                lua_engine.callUpdate();
+            }
+            // Coroutine-driven tick: flip() inside the cart yields back here so
+            // we can render the in-progress fade/animation correctly.
+            _ = lua_engine.tickFrame();
         }
-        // Coroutine-driven tick: flip() inside the cart yields back here so
-        // we can render the in-progress fade/animation correctly.
-        _ = lua_engine.tickFrame();
+
+        // extcmd("reset")/menu reset, and extcmd("shutdown").
+        if (pico.request_shutdown) running = false;
+        if (pico.request_reset) {
+            pico.request_reset = false;
+            if (current_cart_path) |path| {
+                pico.param_str_len = 0;
+                loadCart(&pico, &lua_engine, allocator, path) catch |err| {
+                    std.log.err("extcmd reset failed: {}", .{err});
+                };
+            }
+        }
 
         // Handle multi-cart load() requests
         if (pico.pending_load != null) {
@@ -270,6 +355,11 @@ pub fn main(init: std.process.Init) !void {
 
         // Render screen buffer to ARGB
         gfx.renderToARGB(&memory, &pixel_buffer);
+
+        // Pause menu overlay (drawn over the frozen frame, leaving screen RAM intact)
+        if (pico.menu_open) {
+            pause_menu.render(&pico, &pixel_buffer);
+        }
 
         // Draw save/load indicator: 2px screen border cycling through 16 colors
         if (frame_start.nanoseconds < indicator_end_time.nanoseconds) {

@@ -5,6 +5,14 @@ const cart_mod = @import("cart.zig");
 const api = @import("api.zig");
 const preprocessor = @import("preprocessor.zig");
 
+/// Host callback that runs one full host frame mid-execution (during flip()):
+/// pumps events, refreshes input, and presents. Returns false if the host wants
+/// to quit, so a flip-driven loop inside _init can be abandoned.
+pub const PresentHook = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque) bool,
+};
+
 pub const LuaEngine = struct {
     lua: *zlua.Lua,
     has_init: bool = false,
@@ -23,6 +31,10 @@ pub const LuaEngine = struct {
     tick_co: ?*zlua.Lua = null,
     // Registry ref to keep the active tick coroutine GC-anchored.
     tick_co_ref: c_int = -1,
+    // Optional host callback that renders + presents the current frame. Set by
+    // the native host so flip() inside _init (loading screens / intros) shows
+    // intermediate frames instead of collapsing into one. Null in headless.
+    present_hook: ?PresentHook = null,
 
     pub fn init(allocator: std.mem.Allocator, pico: *api.PicoState) !LuaEngine {
         const lua = try zlua.Lua.init(allocator);
@@ -62,17 +74,28 @@ pub const LuaEngine = struct {
         const processed = try preprocessor.preprocess(allocator, cart.lua_code);
         errdefer allocator.free(processed);
 
-        // Load and execute the processed code — don't replace source until success
-        self.lua.loadBuffer(processed, "cart", .text) catch {
+        // Run the cart's top-level chunk inside a coroutine so a flip()-driven
+        // main loop at file scope (minimalist carts) presents frames instead of
+        // hanging. For ordinary carts (no top-level flip) this resumes once to
+        // completion, identical to a protected call.
+        const co = self.lua.newThread();
+        const co_ref = self.lua.ref(zlua.registry_index) catch {
             self.captureError();
+            return error.LuaLoadError;
+        };
+        defer self.lua.unref(zlua.registry_index, co_ref);
+        co.loadBuffer(processed, "cart", .text) catch {
+            self.captureCoError(co, "lua load error");
             std.log.err("lua load error: {s}", .{self.getErrorMsg()});
             return error.LuaLoadError;
         };
-        self.lua.protectedCall(.{ .results = zlua.mult_return }) catch {
-            self.captureError();
-            std.log.err("lua exec error: {s}", .{self.getErrorMsg()});
-            return error.LuaExecError;
-        };
+        switch (self.driveWithFlips(co, 0)) {
+            .ok, .quit => {},
+            .errored => {
+                std.log.err("lua exec error: {s}", .{self.getErrorMsg()});
+                return error.LuaExecError;
+            },
+        }
 
         // Success — now commit the new source
         if (self.processed_source) |old| allocator.free(old);
@@ -88,11 +111,71 @@ pub const LuaEngine = struct {
     pub fn callInit(self: *LuaEngine) void {
         if (self.had_error) return;
         if (self.has_init) {
-            self.callGlobal("_init", true);
+            // Run _init inside a coroutine so flip() (loading screens, intro
+            // fades) yields and presents a frame instead of collapsing. Without
+            // a present hook (headless) the flips simply resume immediately.
+            self.runWithFlips("_init");
         }
         // _init may install lifecycle hooks dynamically (e.g. start_title sets
         // _update60 = update_title), so re-detect after running it.
         self.refreshLifecycleFlags();
+    }
+
+    const DriveOutcome = enum { ok, errored, quit };
+
+    /// Resume a coroutine to completion, running a host frame (present + input)
+    /// each time it yields on flip(). A pending load()/run() raised from within
+    /// is a control signal (→ .ok), not an error; the host requesting quit on a
+    /// flip → .quit (the still-suspended coroutine is abandoned by the caller).
+    fn driveWithFlips(self: *LuaEngine, co: *zlua.Lua, first_args: i32) DriveOutcome {
+        var num_args = first_args;
+        while (true) {
+            const status = co.resumeThread(self.lua, num_args) catch {
+                if (self.pico.pending_load != null) return .ok;
+                self.captureCoError(co, "coroutine error");
+                return .errored;
+            };
+            num_args = 0;
+            if (status == .ok) return .ok;
+            if (self.present_hook) |h| {
+                if (!h.call(h.ctx)) return .quit;
+            }
+        }
+    }
+
+    /// Copy an error message off a coroutine's stack into error_msg.
+    fn captureCoError(self: *LuaEngine, co: *zlua.Lua, fallback: []const u8) void {
+        self.had_error = true;
+        if (co.toString(-1)) |msg| {
+            const len = @min(msg.len, self.error_msg.len);
+            @memcpy(self.error_msg[0..len], msg[0..len]);
+            self.error_len = len;
+        } else |_| {
+            const len = @min(fallback.len, self.error_msg.len);
+            @memcpy(self.error_msg[0..len], fallback[0..len]);
+            self.error_len = len;
+        }
+    }
+
+    /// Run a global function to completion inside a coroutine, presenting on
+    /// each flip(). Used for _init so loading screens / intro fades animate.
+    fn runWithFlips(self: *LuaEngine, name: [:0]const u8) void {
+        const co = self.lua.newThread();
+        const co_ref = self.lua.ref(zlua.registry_index) catch {
+            self.captureError();
+            return;
+        };
+        defer self.lua.unref(zlua.registry_index, co_ref);
+
+        const t = co.getGlobal(name) catch zlua.LuaType.nil;
+        if (t != zlua.LuaType.function) {
+            co.pop(1);
+            return;
+        }
+
+        if (self.driveWithFlips(co, 0) == .errored) {
+            std.log.err("lua runtime error in {s}: {s}", .{ name, self.getErrorMsg() });
+        }
     }
 
     pub fn callUpdate(self: *LuaEngine) void {
@@ -326,6 +409,10 @@ pub const LuaEngine = struct {
         sandboxGlobals(self.lua);
         api.registerAll(self.lua, self.pico);
         setupEnvFallback(self.lua);
+
+        // The old Lua registry (and every menuitem callback ref it held) is now
+        // gone — drop the stale pause-menu entries.
+        api.clearMenu(self.pico);
 
         self.had_error = false;
         self.error_len = 0;
