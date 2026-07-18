@@ -1,5 +1,7 @@
 # PICO-Z
 
+> **Note:** Development is currently paused while focus shifts to the sibling WASM-only project, [PICO-R](https://github.com/mnmlyw/pico-r).
+
 A PICO-8 emulator with save states. Plays `.p8` and `.p8.png` carts on macOS, Windows, Linux, and [in the browser](https://mnmlyw.github.io/pico-z/play/).
 
 Built with Zig, ziglua (Lua 5.2), and SDL3. Web version compiles to WASM (356KB, no Emscripten).
