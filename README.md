@@ -1,14 +1,8 @@
 # PICO-Z
 
-## ✨ Check out [PICO-R](https://github.com/mnmlyw/pico-r), a new PICO-8 emulator for the web
-
-**[PICO-R](https://github.com/mnmlyw/pico-r)** is a pure-WebAssembly PICO-8 emulator written in Rust, with a hand-rolled Lua VM, bit-exact fixed-point math, and a byte-exact rasterizer checked against the official PICO-8 binary. It runs in any modern browser with no install. **[Try it here](https://mnmlyw.github.io/pico-r/).**
-
-PICO-R is where active development is happening now.
+> ✨ **Check out [PICO-R](https://github.com/mnmlyw/pico-r), a new PICO-8 emulator for the web.**
 
 > 🚧 **A complete rewrite of PICO-Z is in progress.**
-
----
 
 ## About PICO-Z
 
@@ -23,8 +17,6 @@ Tested with [Celeste Classic](https://www.lexaloffle.com/bbs/?tid=2145) and othe
 > **Note:** PICO-Z is a player/emulator only — it does not include PICO-8's editor, splore, or game creation tools. To make games, get [PICO-8](https://www.lexaloffle.com/pico-8.php) from Lexaloffle.
 
 ## Try It
-
-**Want an actively developed web player? Try [PICO-R](https://mnmlyw.github.io/pico-r/).** The PICO-Z web player below is no longer being updated.
 
 **[Play in Browser](https://mnmlyw.github.io/pico-z/play/)** — open any `.p8` or `.p8.png` cart directly in your browser. No install needed.
 
