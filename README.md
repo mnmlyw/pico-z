@@ -1,7 +1,5 @@
 # PICO-Z
 
-> ✨ **Check out [PICO-R](https://github.com/mnmlyw/pico-r), a new PICO-8 emulator for the web.**
-
 > 🚧 **A complete rewrite of PICO-Z is in progress.**
 
 ## About PICO-Z
