@@ -4,7 +4,9 @@
 
 **[PICO-R](https://github.com/mnmlyw/pico-r)** is a pure-WebAssembly PICO-8 emulator written in Rust, with a hand-rolled Lua VM, bit-exact fixed-point math, and a byte-exact rasterizer checked against the official PICO-8 binary. It runs in any modern browser with no install. **[Try it here](https://mnmlyw.github.io/pico-r/).**
 
-PICO-R is where active development is happening now. PICO-Z, the native desktop emulator below, is on hold.
+PICO-R is where active development is happening now.
+
+> 🚧 **A complete rewrite of PICO-Z is in progress.**
 
 ---
 
